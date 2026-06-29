@@ -1,0 +1,20 @@
+{
+  "pomodoro_min": 25,
+  "intervalo_min": 5,
+  "intervalo_longo_min": 15,
+  "pomodoros_ate_intervalo_longo": 4,
+  "usar_intervalos": true,
+  "som_ao_terminar": true,
+  "volume": 40,
+  "som_fim_pomodoro": "Alarme",
+  "som_fim_intervalo": "Digital",
+  "bipe_contagem_regressiva": true,
+  "notificacao_windows": true,
+  "aviso_central": true,
+  "tarefas": [
+    "Estudos",
+    "Trabalho",
+    "Leitura"
+  ],
+  "tarefa_selecionada": "Estudos"
+}
