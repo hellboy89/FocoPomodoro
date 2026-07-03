@@ -11,6 +11,7 @@
   "bipe_contagem_regressiva": true,
   "notificacao_windows": true,
   "aviso_central": true,
+  "dias_historico": 30,
   "tarefas": [
     "Estudos",
     "Trabalho",

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Pasta onde este arquivo está -> garante que os JSON fiquem junto do app,
 # independente de onde o programa for executado.
@@ -35,6 +35,9 @@ CONFIG_PADRAO = {
     "bipe_contagem_regressiva": True,
     "notificacao_windows": True,
     "aviso_central": True,
+    # Por quantos dias manter o histórico. Registros mais antigos que isso
+    # são descartados automaticamente para não inchar o JSON.
+    "dias_historico": 30,
     # Itens que aparecem no combobox "No que você vai focar?" da aba Timer.
     # A lista é livre: o usuário adiciona/remove quantos quiser nas Configurações.
     "tarefas": ["Estudos", "Trabalho", "Leitura"],
@@ -97,8 +100,44 @@ def carregar_historico() -> list[dict]:
     return []
 
 
-def registrar_pomodoro(tarefa: str, duracao_min: int) -> dict:
-    """Acrescenta um pomodoro concluído ao histórico e o devolve."""
+def _data_registro(registro: dict) -> datetime | None:
+    """Extrai a data de um registro; None se estiver ausente/ inválida."""
+    texto = str(registro.get("data", "")).strip()
+    for formato in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(texto, formato)
+        except ValueError:
+            continue
+    return None
+
+
+def podar_historico(dias: int) -> list[dict]:
+    """Remove registros mais antigos que `dias` dias e regrava o arquivo.
+
+    Devolve a lista já podada. Registros sem data válida são mantidos
+    (não dá para saber se são antigos)."""
+    historico = carregar_historico()
+    try:
+        dias = int(dias)
+    except (TypeError, ValueError):
+        return historico
+    if dias <= 0:
+        return historico
+
+    limite = datetime.now() - timedelta(days=dias)
+    podado = [
+        r for r in historico
+        if (_data_registro(r) is None) or (_data_registro(r) >= limite)
+    ]
+    if len(podado) != len(historico):
+        _gravar_json(ARQUIVO_HISTORICO, {"pomodoros": podado})
+    return podado
+
+
+def registrar_pomodoro(tarefa: str, duracao_min: int, dias_manter: int = 0) -> dict:
+    """Acrescenta um pomodoro concluído ao histórico e o devolve.
+
+    Se `dias_manter` > 0, poda registros antigos após gravar."""
     historico = carregar_historico()
     registro = {
         "data": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -107,6 +146,8 @@ def registrar_pomodoro(tarefa: str, duracao_min: int) -> dict:
     }
     historico.append(registro)
     _gravar_json(ARQUIVO_HISTORICO, {"pomodoros": historico})
+    if dias_manter and dias_manter > 0:
+        podar_historico(dias_manter)
     return registro
 
 

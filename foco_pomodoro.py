@@ -36,6 +36,9 @@ COR_INTERVALO = "#4ec9a6"  # verde-menta
 COR_TRILHA = "#3a3e52"    # trilha do anel (fundo)
 COR_BOTAO = "#3a3e52"
 COR_BOTAO_ATIVO = "#4a4f68"
+COR_SCROLL_TRILHA = "#252838"  # fundo da barra de rolagem (escuro)
+COR_SCROLL = "#565c78"         # cursor da barra (claro, contrasta com a trilha)
+COR_SCROLL_ATIVO = "#727a9c"   # cursor ao passar/arrastar (mais claro)
 
 FONTE = "Segoe UI"
 
@@ -52,6 +55,9 @@ class FocoPomodoro:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.config = db.carregar_config()
+
+        # Ao abrir, já descarta registros de histórico além do limite salvo.
+        db.podar_historico(self.config["dias_historico"])
 
         # Estado do timer ------------------------------------------------- #
         self.estado = FOCO
@@ -103,6 +109,26 @@ class FocoPomodoro:
             foreground=[("selected", COR_FOCO)],
         )
 
+        # Barras de rolagem: cursor claro sobre trilha escura, para que
+        # fique visível onde se está clicando (vale para todas as barras).
+        for orient in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
+            estilo.configure(
+                orient,
+                background=COR_SCROLL,           # cursor (parte que arrasta)
+                troughcolor=COR_SCROLL_TRILHA,   # trilha de fundo
+                bordercolor=COR_SCROLL_TRILHA,
+                arrowcolor=COR_TEXTO_FRACO,
+                relief="flat",
+                borderwidth=0,
+            )
+            estilo.map(
+                orient,
+                background=[
+                    ("pressed", COR_SCROLL_ATIVO),
+                    ("active", COR_SCROLL_ATIVO),
+                ],
+            )
+
     def _montar_interface(self) -> None:
         self.abas = ttk.Notebook(self.root)
         self.abas.pack(fill="both", expand=True, padx=10, pady=10)
@@ -118,6 +144,11 @@ class FocoPomodoro:
         self._montar_aba_timer()
         self._montar_aba_historico()
         self._montar_aba_config()
+
+        # Aviso de configurações não salvas ao sair da aba Configurações.
+        self._idx_config = self.abas.index(self.aba_config)
+        self._aba_atual = self.abas.index(self.abas.select())
+        self.abas.bind("<<NotebookTabChanged>>", self._ao_trocar_aba, add="+")
 
     # --------------------------- Aba Timer ------------------------------ #
     def _montar_aba_timer(self) -> None:
@@ -358,6 +389,7 @@ class FocoPomodoro:
         self.var_bipe = tk.BooleanVar(value=self.config["bipe_contagem_regressiva"])
         self.var_notificacao = tk.BooleanVar(value=self.config["notificacao_windows"])
         self.var_aviso_central = tk.BooleanVar(value=self.config["aviso_central"])
+        self.var_dias_historico = tk.StringVar(value=str(self.config["dias_historico"]))
 
         # ---- Tempos ----
         self._titulo_secao(wrap, "⏱  Tempos")
@@ -426,6 +458,31 @@ class FocoPomodoro:
             lambda: self._mostrar_aviso_central(
                 "Pomodoro concluído! 🍅", "Exemplo de aviso central.", COR_FOCO),
         ).pack(side="left", padx=(8, 0))
+
+        # ---- Histórico ----
+        self._titulo_secao(wrap, "🗂  Histórico")
+        linha_hist = tk.Frame(wrap, bg=COR_FUNDO)
+        linha_hist.pack(fill="x", pady=5)
+        tk.Label(
+            linha_hist, text="Manter histórico dos últimos", font=(FONTE, 10),
+            fg=COR_TEXTO, bg=COR_FUNDO,
+        ).pack(side="left")
+        tk.Label(
+            linha_hist, text="dias", font=(FONTE, 10),
+            fg=COR_TEXTO, bg=COR_FUNDO,
+        ).pack(side="right")
+        ttk.Combobox(
+            linha_hist, textvariable=self.var_dias_historico,
+            values=["30", "60", "120"], state="readonly",
+            width=5, font=(FONTE, 10), justify="center",
+        ).pack(side="right", padx=6)
+        tk.Label(
+            wrap,
+            text=("Registros mais antigos que esse limite são apagados "
+                  "automaticamente para não pesar o arquivo."),
+            font=(FONTE, 9), fg=COR_TEXTO_FRACO, bg=COR_FUNDO,
+            justify="left", wraplength=360,
+        ).pack(anchor="w", pady=(0, 4))
 
         # ---- Tarefas de foco (itens do combobox) ----
         self._titulo_secao(wrap, "📝  Tarefas de foco (lista do combobox)")
@@ -643,7 +700,10 @@ class FocoPomodoro:
 
         if terminou_foco:
             # Registra o pomodoro concluído.
-            db.registrar_pomodoro(tarefa, self.config["pomodoro_min"])
+            db.registrar_pomodoro(
+                tarefa, self.config["pomodoro_min"],
+                dias_manter=self.config.get("dias_historico", 30),
+            )
             self.pomodoros_concluidos_sessao += 1
             self.lbl_sessao.config(
                 text=f"Pomodoros nesta sessão: {self.pomodoros_concluidos_sessao}"
@@ -791,8 +851,10 @@ class FocoPomodoro:
     # ===================================================================== #
     # Ações de configuração e dados
     # ===================================================================== #
-    def salvar_configuracoes(self) -> None:
-        self.config.update({
+    def _valores_config_atuais(self) -> dict:
+        """Lê as variáveis da aba Configurações e devolve o dicionário
+        correspondente. Pode lançar tk.TclError se algum campo estiver vazio."""
+        return {
             "pomodoro_min": int(self.var_pomodoro.get()),
             "intervalo_min": int(self.var_intervalo.get()),
             "intervalo_longo_min": int(self.var_intervalo_longo.get()),
@@ -805,8 +867,25 @@ class FocoPomodoro:
             "bipe_contagem_regressiva": bool(self.var_bipe.get()),
             "notificacao_windows": bool(self.var_notificacao.get()),
             "aviso_central": bool(self.var_aviso_central.get()),
-        })
+            "dias_historico": int(self.var_dias_historico.get() or 30),
+        }
+
+    def _config_tem_alteracoes(self) -> bool:
+        """True se as configurações na tela diferem das já salvas."""
+        try:
+            atuais = self._valores_config_atuais()
+        except tk.TclError:
+            # Campo em branco/ inválido -> trata como alteração pendente.
+            return True
+        return any(self.config.get(chave) != valor for chave, valor in atuais.items())
+
+    def salvar_configuracoes(self) -> None:
+        self.config.update(self._valores_config_atuais())
         db.salvar_config(self.config)
+
+        # Aplica imediatamente o novo limite de retenção do histórico.
+        db.podar_historico(self.config["dias_historico"])
+        self._atualizar_aba_historico()
 
         # Se o timer estiver parado, aplica o novo tempo ao ciclo atual.
         if not self.rodando:
@@ -816,6 +895,52 @@ class FocoPomodoro:
 
         self.lbl_aviso_config.config(text="✓ Configurações salvas!")
         self.root.after(2500, lambda: self.lbl_aviso_config.config(text=""))
+
+    def _reverter_config(self) -> None:
+        """Restaura as variáveis da aba com os valores atualmente salvos."""
+        self.var_pomodoro.set(self.config["pomodoro_min"])
+        self.var_intervalo.set(self.config["intervalo_min"])
+        self.var_intervalo_longo.set(self.config["intervalo_longo_min"])
+        self.var_ate_longo.set(self.config["pomodoros_ate_intervalo_longo"])
+        self.var_usar_intervalos.set(self.config["usar_intervalos"])
+        self.var_som.set(self.config["som_ao_terminar"])
+        self.var_volume.set(self.config["volume"])
+        self.var_som_pomodoro.set(self.config["som_fim_pomodoro"])
+        self.var_som_intervalo.set(self.config["som_fim_intervalo"])
+        self.var_bipe.set(self.config["bipe_contagem_regressiva"])
+        self.var_notificacao.set(self.config["notificacao_windows"])
+        self.var_aviso_central.set(self.config["aviso_central"])
+        self.var_dias_historico.set(str(self.config["dias_historico"]))
+
+    def _tratar_config_pendente(self) -> bool:
+        """Se houver alterações não salvas na aba Configurações, pergunta o
+        que fazer. Retorna False se o usuário escolher Cancelar (para abortar
+        a troca de aba / o fechamento em curso)."""
+        if not self._config_tem_alteracoes():
+            return True
+        resposta = messagebox.askyesnocancel(
+            "Configurações não salvas",
+            "Você alterou as configurações mas ainda não salvou.\n\n"
+            "Deseja salvar as alterações?",
+        )
+        if resposta is None:      # Cancelar -> permanece onde está
+            return False
+        if resposta:              # Sim -> salva
+            self.salvar_configuracoes()
+        else:                     # Não -> descarta e volta aos valores salvos
+            self._reverter_config()
+        return True
+
+    def _ao_trocar_aba(self, evento=None) -> None:
+        """Ao sair da aba de Configurações, avisa se houver algo não salvo."""
+        atual = self.abas.index(self.abas.select())
+        anterior = self._aba_atual
+        self._aba_atual = atual
+        if anterior == self._idx_config and atual != self._idx_config:
+            if not self._tratar_config_pendente():
+                # Cancelou -> traz de volta para a aba de Configurações.
+                self._aba_atual = self._idx_config
+                self.abas.select(self._idx_config)
 
     # --------------------- Lista de tarefas (combobox) ------------------- #
     def _recarregar_lista_tarefas(self) -> None:
@@ -949,6 +1074,9 @@ def main() -> None:
 
     # Evita fechar a janela no meio de um pomodoro sem avisar.
     def ao_fechar():
+        # Avisa se há configurações alteradas e ainda não salvas.
+        if not app._tratar_config_pendente():
+            return
         if app.rodando and not messagebox.askyesno(
             "Sair", "O timer está rodando. Deseja realmente sair?"
         ):

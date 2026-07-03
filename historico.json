@@ -1,3 +1,429 @@
 {
-  "pomodoros": []
+  "pomodoros": [
+    {
+      "data": "2026-06-22 15:18",
+      "tarefa": "estudar",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-22 15:37",
+      "tarefa": "estudar",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-22 15:55",
+      "tarefa": "estudar",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-23 09:04",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-23 09:23",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-23 09:41",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-23 09:59",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-23 10:17",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-23 11:17",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-23 11:36",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-23 14:34",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-23 14:54",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-24 09:05",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-24 10:39",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-24 11:03",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-24 11:27",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-24 11:55",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-24 14:52",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-24 15:21",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-25 10:13",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-25 10:36",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-25 10:59",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-25 12:36",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-25 12:59",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-25 15:25",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-26 15:51",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-26 16:33",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-26 18:32",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-26 18:51",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-26 19:09",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-26 19:55",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-26 20:13",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-27 10:13",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-27 10:36",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-27 11:00",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-27 11:35",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-27 11:53",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-28 10:19",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-28 10:38",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-28 11:05",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-28 11:28",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-28 11:51",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-29 10:23",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-29 10:46",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-29 11:09",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-29 11:33",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-29 13:27",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-29 13:45",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-29 14:03",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-29 14:22",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-29 16:41",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-29 17:09",
+      "tarefa": "Estudos AZ-104",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-29 17:28",
+      "tarefa": "Estudos AZ-104",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-30 10:25",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-06-30 10:51",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-30 11:09",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-30 11:27",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-30 11:45",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-30 12:04",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-30 12:25",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-30 15:37",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-30 15:55",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-30 16:14",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-30 16:32",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-06-30 17:24",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-01 09:58",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-01 10:16",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-01 10:34",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-01 10:53",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-01 11:11",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-01 11:45",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-01 12:08",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-01 16:33",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-01 16:51",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-01 17:09",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-01 17:27",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-02 15:02",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-02 16:33",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-07-02 16:58",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-02 17:16",
+      "tarefa": "Estudos AZ-900",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-02 19:05",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-02 19:46",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-02 20:10",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-02 20:28",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    },
+    {
+      "data": "2026-07-02 20:46",
+      "tarefa": "Currículo",
+      "duracao_min": 15
+    }
+  ]
 }
