@@ -424,6 +424,16 @@
       "data": "2026-07-02 20:46",
       "tarefa": "Currículo",
       "duracao_min": 15
+    },
+    {
+      "data": "2026-07-02 21:32",
+      "tarefa": "Estudos",
+      "duracao_min": 1
+    },
+    {
+      "data": "2026-07-02 21:37",
+      "tarefa": "Estudos",
+      "duracao_min": 1
     }
   ]
 }

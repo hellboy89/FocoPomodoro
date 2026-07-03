@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 import re
 import struct
 import tempfile
@@ -76,6 +77,48 @@ ALERTAS = {
 NOMES_ALERTAS = [n for n in ALERTAS if not n.startswith("__")]
 
 
+# --------------------------------------------------------------------------- #
+# Sons ambiente (loops contínuos durante o foco)
+# --------------------------------------------------------------------------- #
+def _tique_taque(volume: int) -> bytearray:
+    """Loop de 2s imitando um relógio: 'tique' agudo e 'taque' mais grave."""
+    v = max(0, min(100, volume)) * 0.5  # ambiente mais discreto que os alertas
+    quadro = _tom(1800, 0.03, int(v), fade=0.008)
+    quadro += _silencio(0.97)
+    quadro += _tom(1350, 0.03, int(v * 0.8), fade=0.008)
+    quadro += _silencio(0.97)
+    return quadro
+
+
+def _chuva(volume: int) -> bytearray:
+    """Ruído suave tipo chuva: ruído branco filtrado por média móvel."""
+    dur = 4.0  # loop de 4s disfarça bem a repetição
+    n = int(TAXA * dur)
+    amp = (max(0, min(100, volume)) / 100.0) * 0.35 * 32767
+    rng = random.Random(42)  # semente fixa -> mesmo arquivo a cada geração
+    frames = bytearray()
+    media = 0.0
+    suave = 0.12  # fator do filtro (menor = mais grave/abafado)
+    nf = int(TAXA * 0.05)  # fade nas pontas para o loop emendar sem clique
+    for i in range(n):
+        media += suave * (rng.uniform(-1, 1) - media)
+        if i < nf:
+            env = i / nf
+        elif i > n - nf:
+            env = (n - i) / nf
+        else:
+            env = 1.0
+        frames += struct.pack("<h", int(amp * env * media))
+    return frames
+
+
+AMBIENTES = {
+    "Tique-taque": _tique_taque,
+    "Chuva suave": _chuva,
+}
+NOMES_AMBIENTES = ["Nenhum"] + list(AMBIENTES)
+
+
 def _gravar_wav(caminho: str, frames: bytearray) -> None:
     with wave.open(caminho, "wb") as w:
         w.setnchannels(1)
@@ -84,14 +127,19 @@ def _gravar_wav(caminho: str, frames: bytearray) -> None:
         w.writeframes(bytes(frames))
 
 
-def _arquivo_wav(nome: str, volume: int) -> str:
-    chave = (nome, volume)
+def _arquivo_wav(nome: str, volume: int, ambiente: bool = False) -> str:
+    chave = (nome, volume, ambiente)
     caminho = _cache.get(chave)
     if caminho and os.path.exists(caminho):
         return caminho
-    construtor = ALERTAS.get(nome, ALERTAS["Bipe simples"])
+    if ambiente:
+        construtor = AMBIENTES.get(nome, _tique_taque)
+        prefixo = "amb_"
+    else:
+        construtor = ALERTAS.get(nome, ALERTAS["Bipe simples"])
+        prefixo = ""
     seguro = re.sub(r"[^a-zA-Z0-9_]", "", nome) or "som"
-    caminho = os.path.join(PASTA_TEMP, f"{seguro}_{volume}.wav")
+    caminho = os.path.join(PASTA_TEMP, f"{prefixo}{seguro}_{volume}.wav")
     _gravar_wav(caminho, construtor(volume))
     _cache[chave] = caminho
     return caminho
@@ -118,3 +166,31 @@ def tocar(nome: str, volume: int) -> None:
 def tocar_tique(volume: int) -> None:
     """Bipe curto da contagem regressiva (últimos segundos)."""
     _tocar_arquivo("__tique__", volume)
+
+
+def tocar_ambiente(nome: str, volume: int) -> None:
+    """Inicia um som ambiente em loop contínuo (até parar ou outro som tocar).
+
+    Observação: o winsound só reproduz um som por vez — qualquer alerta
+    tocado depois substitui o loop. Quem chama deve reiniciar o ambiente
+    se quiser retomá-lo."""
+    if winsound is None or volume <= 0 or nome not in AMBIENTES:
+        return
+    try:
+        caminho = _arquivo_wav(nome, volume, ambiente=True)
+        winsound.PlaySound(
+            caminho,
+            winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_LOOP,
+        )
+    except Exception:
+        pass
+
+
+def parar_ambiente() -> None:
+    """Interrompe qualquer som em reprodução (inclusive o loop ambiente)."""
+    if winsound is None:
+        return
+    try:
+        winsound.PlaySound(None, winsound.SND_PURGE)
+    except Exception:
+        pass

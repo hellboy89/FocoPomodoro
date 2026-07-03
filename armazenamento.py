@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 # Pasta onde este arquivo está -> garante que os JSON fiquem junto do app,
 # independente de onde o programa for executado.
@@ -35,6 +35,14 @@ CONFIG_PADRAO = {
     "bipe_contagem_regressiva": True,
     "notificacao_windows": True,
     "aviso_central": True,
+    # Inicia o próximo ciclo automaticamente ao terminar o atual.
+    "auto_iniciar": True,
+    # Minutos extras do botão "prorrogar foco" do aviso de fim de pomodoro.
+    "prorrogacao_min": 5,
+    # Som contínuo durante o foco ("Nenhum" desliga).
+    "som_ambiente": "Nenhum",
+    # Meta de pomodoros por dia (0 = sem meta).
+    "meta_pomodoros_dia": 0,
     # Por quantos dias manter o histórico. Registros mais antigos que isso
     # são descartados automaticamente para não inchar o JSON.
     "dias_historico": 30,
@@ -134,9 +142,13 @@ def podar_historico(dias: int) -> list[dict]:
     return podado
 
 
-def registrar_pomodoro(tarefa: str, duracao_min: int, dias_manter: int = 0) -> dict:
+def registrar_pomodoro(
+    tarefa: str, duracao_min: int, dias_manter: int = 0, parcial: bool = False,
+) -> dict:
     """Acrescenta um pomodoro concluído ao histórico e o devolve.
 
+    `parcial=True` marca um foco interrompido antes do fim (o tempo já
+    focado é aproveitado, mas não conta como pomodoro completo).
     Se `dias_manter` > 0, poda registros antigos após gravar."""
     historico = carregar_historico()
     registro = {
@@ -144,6 +156,8 @@ def registrar_pomodoro(tarefa: str, duracao_min: int, dias_manter: int = 0) -> d
         "tarefa": tarefa.strip() or "(sem descrição)",
         "duracao_min": int(duracao_min),
     }
+    if parcial:
+        registro["parcial"] = True
     historico.append(registro)
     _gravar_json(ARQUIVO_HISTORICO, {"pomodoros": historico})
     if dias_manter and dias_manter > 0:
@@ -164,3 +178,67 @@ def resumo_historico() -> dict:
         "quantidade": len(historico),
         "total_minutos": total_min,
     }
+
+
+def renomear_tarefa_historico(antigo: str, novo: str) -> int:
+    """Troca o nome de uma tarefa em todos os registros do histórico.
+
+    Devolve quantos registros foram alterados."""
+    historico = carregar_historico()
+    alterados = 0
+    for reg in historico:
+        if reg.get("tarefa") == antigo:
+            reg["tarefa"] = novo
+            alterados += 1
+    if alterados:
+        _gravar_json(ARQUIVO_HISTORICO, {"pomodoros": historico})
+    return alterados
+
+
+# --------------------------------------------------------------------------- #
+# Estatísticas (agregações usadas na aba Estatísticas)
+# --------------------------------------------------------------------------- #
+def minutos_por_dia(dias: int) -> dict[str, int]:
+    """Minutos de foco somados por dia (AAAA-MM-DD) nos últimos `dias` dias.
+
+    Todos os dias do período entram no resultado, mesmo com 0 minutos,
+    em ordem cronológica — pronto para desenhar o gráfico."""
+    hoje = date.today()
+    resultado = {
+        (hoje - timedelta(days=i)).isoformat(): 0
+        for i in range(dias - 1, -1, -1)
+    }
+    for reg in carregar_historico():
+        dia = str(reg.get("data", ""))[:10]
+        if dia in resultado:
+            resultado[dia] += int(reg.get("duracao_min", 0))
+    return resultado
+
+
+def pomodoros_do_dia(dia: str | None = None) -> int:
+    """Quantidade de pomodoros COMPLETOS (não parciais) de um dia
+    (padrão: hoje). Usado para a meta diária."""
+    dia = dia or date.today().isoformat()
+    return sum(
+        1 for reg in carregar_historico()
+        if str(reg.get("data", ""))[:10] == dia and not reg.get("parcial")
+    )
+
+
+def calcular_streak() -> int:
+    """Dias consecutivos (terminando hoje ou ontem) com ao menos um
+    pomodoro completo. Hoje ainda sem registro não quebra a sequência."""
+    dias_com_foco = {
+        str(reg.get("data", ""))[:10]
+        for reg in carregar_historico()
+        if not reg.get("parcial")
+    }
+    hoje = date.today()
+    # A sequência pode começar hoje ou, se hoje ainda não teve foco, ontem.
+    inicio = hoje if hoje.isoformat() in dias_com_foco else hoje - timedelta(days=1)
+    streak = 0
+    dia = inicio
+    while dia.isoformat() in dias_com_foco:
+        streak += 1
+        dia -= timedelta(days=1)
+    return streak

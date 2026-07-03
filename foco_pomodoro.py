@@ -3,9 +3,16 @@ Foco Pomodoro — um timer Pomodoro visual para estudos e trabalho.
 
 Recursos:
   * Tempos de foco e de intervalo configuráveis.
-  * Opção de desligar os intervalos (um pomodoro após o outro).
+  * Opção de desligar os intervalos (um pomodoro após o outro) e de
+    desligar o início automático do próximo ciclo.
   * Campo de descrição preenchido antes de iniciar (estudos, trabalho...).
-  * Histórico persistente em JSON com tempo total de foco.
+  * Histórico persistente em JSON com tempo total de foco e exportação CSV.
+  * Foco interrompido no meio é aproveitado como registro parcial (◐).
+  * Aba Estatísticas: gráfico dos últimos 14 dias, sequência de dias
+    (streak), meta diária de pomodoros e média por dia.
+  * Prorrogação do foco ao fim de um pomodoro (minutos configuráveis).
+  * Som ambiente opcional durante o foco (tique-taque ou chuva).
+  * Atalhos: Espaço inicia/pausa, R reinicia, S pula.
   * Botão para limpar os dados quando quiser.
 
 Interface feita com tkinter (já incluído no Python). Tema escuro com um
@@ -14,10 +21,12 @@ anel circular de progresso desenhado em um Canvas.
 
 from __future__ import annotations
 
+import csv
+import math
 import sys
 from datetime import date
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import armazenamento as db
 import notificacao
@@ -28,7 +37,7 @@ import sons
 # Paleta de cores (tema escuro "tomate")
 # --------------------------------------------------------------------------- #
 COR_FUNDO = "#1e2030"
-COR_PAINEL = "#282b3d"
+COR_PAINEL = "#2b2f45"
 COR_TEXTO = "#e7e8ee"
 COR_TEXTO_FRACO = "#9aa0b5"
 COR_FOCO = "#ff6b6b"      # vermelho-tomate
@@ -39,8 +48,17 @@ COR_BOTAO_ATIVO = "#4a4f68"
 COR_SCROLL_TRILHA = "#252838"  # fundo da barra de rolagem (escuro)
 COR_SCROLL = "#565c78"         # cursor da barra (claro, contrasta com a trilha)
 COR_SCROLL_ATIVO = "#727a9c"   # cursor ao passar/arrastar (mais claro)
+COR_DESTAQUE = "#f5a97f"       # âmbar: streak, meta e barra de hoje no gráfico
 
 FONTE = "Segoe UI"
+
+
+def _clarear(cor: str, fator: float = 0.16) -> str:
+    """Clareia uma cor #rrggbb misturando-a com branco (para efeitos hover)."""
+    r, g, b = (int(cor[i:i + 2], 16) for i in (1, 3, 5))
+    return "#%02x%02x%02x" % tuple(
+        min(255, int(c + (255 - c) * fator)) for c in (r, g, b)
+    )
 
 # Estados possíveis do ciclo.
 FOCO = "foco"
@@ -66,6 +84,7 @@ class FocoPomodoro:
         self.segundos_totais = self.segundos_restantes
         self.pomodoros_concluidos_sessao = 0
         self._job = None  # id do agendamento .after()
+        self._prorrogacao = False  # True enquanto corre um "+5 min" extra
 
         self._montar_janela()
         self._montar_interface()
@@ -135,20 +154,44 @@ class FocoPomodoro:
 
         self.aba_timer = tk.Frame(self.abas, bg=COR_FUNDO)
         self.aba_historico = tk.Frame(self.abas, bg=COR_FUNDO)
+        self.aba_stats = tk.Frame(self.abas, bg=COR_FUNDO)
         self.aba_config = tk.Frame(self.abas, bg=COR_FUNDO)
 
         self.abas.add(self.aba_timer, text="Timer")
         self.abas.add(self.aba_historico, text="Histórico")
+        self.abas.add(self.aba_stats, text="Estatísticas")
         self.abas.add(self.aba_config, text="Configurações")
 
         self._montar_aba_timer()
         self._montar_aba_historico()
+        self._montar_aba_estatisticas()
         self._montar_aba_config()
 
         # Aviso de configurações não salvas ao sair da aba Configurações.
         self._idx_config = self.abas.index(self.aba_config)
+        self._idx_stats = self.abas.index(self.aba_stats)
         self._aba_atual = self.abas.index(self.abas.select())
         self.abas.bind("<<NotebookTabChanged>>", self._ao_trocar_aba, add="+")
+
+        # Atalhos de teclado (só agem na aba Timer, fora de campos de texto).
+        atalhos = {
+            "<space>": self.alternar_play_pause,
+            "<r>": self.reiniciar_ciclo, "<R>": self.reiniciar_ciclo,
+            "<s>": self.pular_ciclo, "<S>": self.pular_ciclo,
+        }
+        for tecla, acao in atalhos.items():
+            self.root.bind(tecla, lambda e, a=acao: self._atalho_teclado(a))
+
+    def _atalho_teclado(self, acao) -> str | None:
+        """Dispara a ação do atalho, ignorando quando o usuário está
+        digitando num campo ou fora da aba Timer."""
+        foco = self.root.focus_get()
+        if isinstance(foco, (tk.Entry, tk.Spinbox, tk.Listbox, ttk.Combobox, tk.Button)):
+            return None
+        if self._aba_atual != self.abas.index(self.aba_timer):
+            return None
+        acao()
+        return "break"
 
     # --------------------------- Aba Timer ------------------------------ #
     def _montar_aba_timer(self) -> None:
@@ -182,6 +225,15 @@ class FocoPomodoro:
         self.arco_progresso = self.canvas.create_arc(
             *self.caixa_anel, start=90, extent=0,
             style="arc", outline=COR_FOCO, width=14,
+        )
+        # Pontas arredondadas: dois círculos que acompanham o arco (o Canvas
+        # não tem capstyle para arcos, então desenhamos as "tampas" à mão).
+        self.raio_anel = (self.caixa_anel[2] - self.caixa_anel[0]) / 2
+        self.cap_inicio = self.canvas.create_oval(
+            0, 0, 0, 0, fill=COR_FOCO, width=0, state="hidden",
+        )
+        self.cap_fim = self.canvas.create_oval(
+            0, 0, 0, 0, fill=COR_FOCO, width=0, state="hidden",
         )
         # Texto central com o tempo.
         centro = self.tamanho_anel / 2
@@ -240,11 +292,24 @@ class FocoPomodoro:
             botoes, "⏭ Pular", self.pular_ciclo,
         ).grid(row=0, column=2, padx=5)
 
+        tk.Label(
+            f, text="Espaço inicia/pausa   ·   R reinicia   ·   S pula",
+            font=(FONTE, 8), fg=COR_TEXTO_FRACO, bg=COR_FUNDO,
+        ).pack()
+
         self.lbl_sessao = tk.Label(
             f, text="Pomodoros nesta sessão: 0",
             font=(FONTE, 10), fg=COR_TEXTO_FRACO, bg=COR_FUNDO,
         )
-        self.lbl_sessao.pack(pady=(2, 10))
+        self.lbl_sessao.pack(pady=(2, 0))
+
+        # Progresso da meta diária (só aparece quando há meta configurada).
+        self.lbl_meta = tk.Label(
+            f, text="", font=(FONTE, 10, "bold"),
+            fg=COR_DESTAQUE, bg=COR_FUNDO,
+        )
+        self.lbl_meta.pack(pady=(2, 10))
+        self._atualizar_rotulo_meta()
 
     def _criar_botao(self, pai, texto, comando, cor=None, principal=False):
         botao = tk.Button(
@@ -256,6 +321,11 @@ class FocoPomodoro:
             activeforeground=COR_FUNDO if principal else COR_TEXTO,
             relief="flat", bd=0, padx=16, pady=10, cursor="hand2",
         )
+        # Hover: clareia o fundo enquanto o mouse está sobre o botão.
+        base = cor or COR_BOTAO
+        hover = _clarear(base)
+        botao.bind("<Enter>", lambda e: botao.config(bg=hover))
+        botao.bind("<Leave>", lambda e: botao.config(bg=base))
         return botao
 
     # ------------------------- Aba Histórico ---------------------------- #
@@ -349,29 +419,178 @@ class FocoPomodoro:
         self.tabela.column("data", width=120, anchor="w")
         self.tabela.column("tarefa", width=180, anchor="w")
         self.tabela.column("dur", width=50, anchor="center")
+        # Registros parciais (foco interrompido) aparecem esmaecidos.
+        self.tabela.tag_configure("parcial", foreground=COR_TEXTO_FRACO)
 
         scroll = ttk.Scrollbar(moldura, orient="vertical", command=self.tabela.yview)
         self.tabela.configure(yscrollcommand=scroll.set)
         self.tabela.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
+        botoes_hist = tk.Frame(f, bg=COR_FUNDO)
+        botoes_hist.pack(pady=12)
         self._criar_botao(
-            f, "🗑  Limpar todos os dados", self.limpar_dados,
-        ).pack(pady=12)
+            botoes_hist, "⬇  Exportar CSV", self.exportar_csv,
+        ).pack(side="left", padx=5)
+        self._criar_botao(
+            botoes_hist, "🗑  Limpar todos os dados", self.limpar_dados,
+        ).pack(side="left", padx=5)
 
-    def _criar_cartao(self, pai, titulo, valor):
+    def _criar_cartao(self, pai, titulo, valor, cor=COR_FOCO):
         cartao = tk.Frame(pai, bg=COR_PAINEL)
+        # Filete colorido no topo, dá identidade a cada métrica.
+        tk.Frame(cartao, bg=cor, height=3).pack(fill="x")
         tk.Label(
             cartao, text=titulo, font=(FONTE, 9),
             fg=COR_TEXTO_FRACO, bg=COR_PAINEL,
-        ).pack(anchor="w", padx=14, pady=(12, 0))
+        ).pack(anchor="w", padx=14, pady=(10, 0))
         lbl_valor = tk.Label(
             cartao, text=valor, font=(FONTE, 20, "bold"),
-            fg=COR_FOCO, bg=COR_PAINEL,
+            fg=cor, bg=COR_PAINEL,
         )
         lbl_valor.pack(anchor="w", padx=14, pady=(0, 12))
         cartao.lbl_valor = lbl_valor  # guarda referência para atualizar
         return cartao
+
+    # ------------------------ Aba Estatísticas -------------------------- #
+    DIAS_GRAFICO = 14
+
+    def _montar_aba_estatisticas(self) -> None:
+        f = self.aba_stats
+
+        cartoes = tk.Frame(f, bg=COR_FUNDO)
+        cartoes.pack(fill="x", padx=14, pady=(16, 8))
+
+        self.cartao_streak = self._criar_cartao(
+            cartoes, "🔥 Sequência", "0 dias", cor=COR_DESTAQUE,
+        )
+        self.cartao_streak.grid(row=0, column=0, padx=6, sticky="nsew")
+        self.cartao_hoje = self._criar_cartao(
+            cartoes, "🍅 Hoje", "0", cor=COR_FOCO,
+        )
+        self.cartao_hoje.grid(row=0, column=1, padx=6, sticky="nsew")
+        self.cartao_media = self._criar_cartao(
+            cartoes, "⏱ Média/dia", "0 min", cor=COR_INTERVALO,
+        )
+        self.cartao_media.grid(row=0, column=2, padx=6, sticky="nsew")
+        for c in range(3):
+            cartoes.columnconfigure(c, weight=1, uniform="cards")
+
+        tk.Label(
+            f, text=f"Minutos de foco — últimos {self.DIAS_GRAFICO} dias",
+            font=(FONTE, 12, "bold"), fg=COR_TEXTO, bg=COR_FUNDO,
+        ).pack(anchor="w", padx=20, pady=(14, 4))
+
+        moldura = tk.Frame(f, bg=COR_PAINEL)
+        moldura.pack(fill="x", padx=14)
+        self.canvas_grafico = tk.Canvas(
+            moldura, width=400, height=250,
+            bg=COR_PAINEL, highlightthickness=0,
+        )
+        self.canvas_grafico.pack(padx=6, pady=6)
+
+        tk.Label(
+            f,
+            text=("A barra de hoje aparece em âmbar. Registros parciais (◐) "
+                  "contam nos minutos, mas não na meta nem na sequência."),
+            font=(FONTE, 9), fg=COR_TEXTO_FRACO, bg=COR_FUNDO,
+            justify="left", wraplength=400,
+        ).pack(anchor="w", padx=20, pady=(8, 0))
+
+        self._atualizar_estatisticas()
+
+    def _atualizar_estatisticas(self) -> None:
+        """Recalcula cartões e redesenha o gráfico com o histórico atual."""
+        dados = db.minutos_por_dia(self.DIAS_GRAFICO)
+
+        streak = db.calcular_streak()
+        self.cartao_streak.lbl_valor.config(
+            text=f"{streak} dia" + ("" if streak == 1 else "s"),
+        )
+
+        meta = int(self.config.get("meta_pomodoros_dia", 0) or 0)
+        feitos = db.pomodoros_do_dia()
+        self.cartao_hoje.lbl_valor.config(
+            text=f"{feitos} / {meta}" if meta > 0 else str(feitos),
+        )
+
+        media = sum(dados.values()) / max(1, len(dados))
+        self.cartao_media.lbl_valor.config(text=f"{round(media)} min")
+
+        self._desenhar_grafico(dados)
+
+    def _desenhar_grafico(self, dados: dict[str, int]) -> None:
+        """Gráfico de barras (minutos por dia) desenhado direto no Canvas."""
+        cv = self.canvas_grafico
+        cv.delete("all")
+        larg = int(cv["width"])
+        alt = int(cv["height"])
+        m_esq, m_dir, m_topo, m_base = 10, 10, 26, 30
+        area_a = alt - m_topo - m_base
+        y_base = m_topo + area_a
+
+        meta_min = (
+            int(self.config.get("meta_pomodoros_dia", 0) or 0)
+            * self.config["pomodoro_min"]
+        )
+        maximo = max(max(dados.values(), default=0), meta_min, 1)
+
+        # Linha de base.
+        cv.create_line(m_esq, y_base, larg - m_dir, y_base, fill=COR_TRILHA)
+
+        # Linha tracejada da meta diária convertida em minutos.
+        if meta_min > 0:
+            y_meta = m_topo + area_a * (1 - meta_min / maximo)
+            cv.create_line(
+                m_esq, y_meta, larg - m_dir, y_meta,
+                fill=COR_INTERVALO, dash=(4, 4),
+            )
+            cv.create_text(
+                larg - m_dir, y_meta - 8, text=f"meta {meta_min} min",
+                anchor="e", fill=COR_INTERVALO, font=(FONTE, 8),
+            )
+
+        hoje = date.today().isoformat()
+        n = max(1, len(dados))
+        passo = (larg - m_esq - m_dir) / n
+        larg_barra = min(22, passo * 0.62)
+
+        for i, (dia, minutos) in enumerate(dados.items()):
+            cx = m_esq + passo * (i + 0.5)
+            e_hoje = dia == hoje
+            if minutos > 0:
+                h = max(3, area_a * minutos / maximo)
+                cv.create_rectangle(
+                    cx - larg_barra / 2, y_base - h,
+                    cx + larg_barra / 2, y_base,
+                    fill=COR_DESTAQUE if e_hoje else COR_FOCO, width=0,
+                )
+                cv.create_text(
+                    cx, y_base - h - 9, text=str(minutos),
+                    fill=COR_TEXTO if e_hoje else COR_TEXTO_FRACO,
+                    font=(FONTE, 7),
+                )
+            else:
+                # Dia sem foco: traço apagado para marcar a posição.
+                cv.create_rectangle(
+                    cx - larg_barra / 2, y_base - 2,
+                    cx + larg_barra / 2, y_base,
+                    fill=COR_TRILHA, width=0,
+                )
+            cv.create_text(
+                cx, y_base + 12, text=dia[8:10],
+                fill=COR_TEXTO if e_hoje else COR_TEXTO_FRACO, font=(FONTE, 8),
+            )
+
+    def _atualizar_rotulo_meta(self) -> None:
+        """Mostra o progresso da meta diária na aba Timer (se houver meta)."""
+        meta = int(self.config.get("meta_pomodoros_dia", 0) or 0)
+        if meta <= 0:
+            self.lbl_meta.config(text="")
+            return
+        feitos = db.pomodoros_do_dia()
+        icone = "🏆" if feitos >= meta else "🍅"
+        self.lbl_meta.config(text=f"Meta de hoje: {icone} {feitos} / {meta}")
 
     # ------------------------ Aba Configurações ------------------------- #
     def _montar_aba_config(self) -> None:
@@ -390,6 +609,10 @@ class FocoPomodoro:
         self.var_notificacao = tk.BooleanVar(value=self.config["notificacao_windows"])
         self.var_aviso_central = tk.BooleanVar(value=self.config["aviso_central"])
         self.var_dias_historico = tk.StringVar(value=str(self.config["dias_historico"]))
+        self.var_auto_iniciar = tk.BooleanVar(value=self.config["auto_iniciar"])
+        self.var_prorrogacao_min = tk.IntVar(value=self.config["prorrogacao_min"])
+        self.var_som_ambiente = tk.StringVar(value=self.config["som_ambiente"])
+        self.var_meta = tk.IntVar(value=self.config["meta_pomodoros_dia"])
 
         # ---- Tempos ----
         self._titulo_secao(wrap, "⏱  Tempos")
@@ -397,10 +620,26 @@ class FocoPomodoro:
         self._linha_spin(wrap, "Intervalo curto (min)", self.var_intervalo, 1, 60)
         self._linha_spin(wrap, "Intervalo longo (min)", self.var_intervalo_longo, 1, 90)
         self._linha_spin(wrap, "Pomodoros até intervalo longo", self.var_ate_longo, 1, 12)
+        self._linha_spin(wrap, "Prorrogação do foco (min)", self.var_prorrogacao_min, 1, 60)
         self._linha_check(
             wrap, "Usar intervalos (desmarque p/ pomodoros seguidos)",
             self.var_usar_intervalos,
         )
+        self._linha_check(
+            wrap, "Iniciar o próximo ciclo automaticamente",
+            self.var_auto_iniciar,
+        )
+
+        # ---- Meta diária ----
+        self._titulo_secao(wrap, "🎯  Meta diária")
+        self._linha_spin(wrap, "Pomodoros por dia (0 = sem meta)", self.var_meta, 0, 48)
+        tk.Label(
+            wrap,
+            text=("Com uma meta definida, a aba Timer mostra o progresso do "
+                  "dia e você recebe um aviso ao completá-la."),
+            font=(FONTE, 9), fg=COR_TEXTO_FRACO, bg=COR_FUNDO,
+            justify="left", wraplength=360,
+        ).pack(anchor="w", pady=(0, 4))
 
         # ---- Sons ----
         self._titulo_secao(wrap, "🔊  Sons e volume")
@@ -435,6 +674,35 @@ class FocoPomodoro:
         self._linha_check(
             wrap, "Bipe nos últimos 3 segundos do ciclo", self.var_bipe,
         )
+
+        # Som ambiente contínuo durante o foco, com botões de prévia.
+        linha_amb = tk.Frame(wrap, bg=COR_FUNDO)
+        linha_amb.pack(fill="x", pady=5)
+        tk.Label(
+            linha_amb, text="Som ambiente durante o foco", font=(FONTE, 10),
+            fg=COR_TEXTO, bg=COR_FUNDO,
+        ).pack(side="left")
+        self._criar_botao(
+            linha_amb, "⏹", sons.parar_ambiente,
+        ).pack(side="right", padx=(4, 0))
+        self._criar_botao(
+            linha_amb, "▶",
+            lambda: sons.tocar_ambiente(
+                self.var_som_ambiente.get(), self.var_volume.get()),
+        ).pack(side="right", padx=(6, 0))
+        ttk.Combobox(
+            linha_amb, textvariable=self.var_som_ambiente,
+            values=sons.NOMES_AMBIENTES, state="readonly",
+            width=12, font=(FONTE, 10),
+        ).pack(side="right")
+        tk.Label(
+            wrap,
+            text=("O ambiente toca em loop enquanto o foco corre e para nos "
+                  "intervalos. Com ele ativo, o bipe dos últimos segundos do "
+                  "foco é desativado (limitação de som do Windows)."),
+            font=(FONTE, 9), fg=COR_TEXTO_FRACO, bg=COR_FUNDO,
+            justify="left", wraplength=360,
+        ).pack(anchor="w", pady=(0, 4))
 
         # ---- Notificações ----
         self._titulo_secao(wrap, "🔔  Notificações")
@@ -523,9 +791,14 @@ class FocoPomodoro:
             linha_add, "➕ Adicionar", self._adicionar_tarefa,
         ).pack(side="left", padx=(6, 0))
 
+        linha_gerir = tk.Frame(wrap, bg=COR_FUNDO)
+        linha_gerir.pack(anchor="w", pady=(2, 0))
         self._criar_botao(
-            wrap, "🗑 Remover selecionada", self._remover_tarefa,
-        ).pack(anchor="w", pady=(2, 0))
+            linha_gerir, "✏ Renomear", self._renomear_tarefa,
+        ).pack(side="left")
+        self._criar_botao(
+            linha_gerir, "🗑 Remover selecionada", self._remover_tarefa,
+        ).pack(side="left", padx=(8, 0))
 
         self.lbl_aviso_tarefa = tk.Label(
             wrap, text="", font=(FONTE, 9), fg=COR_FOCO, bg=COR_FUNDO,
@@ -652,15 +925,33 @@ class FocoPomodoro:
         self.rodando = True
         self.btn_iniciar.config(text="⏸  Pausar")
         self._bloquear_tarefa(True)
+        # O ambiente entra com um pequeno atraso para não engolir o alerta
+        # de fim de ciclo (o winsound só toca um som por vez).
+        self.root.after(1500, self._iniciar_ambiente)
         self._tique()
 
     def _pausar(self) -> None:
         self.rodando = False
         self.btn_iniciar.config(text="▶  Iniciar")
         self._bloquear_tarefa(False)
+        sons.parar_ambiente()
         if self._job is not None:
             self.root.after_cancel(self._job)
             self._job = None
+
+    def _ambiente_ligado(self) -> bool:
+        """True se há um som ambiente configurado para tocar no foco."""
+        return (
+            self.config.get("som_ambiente", "Nenhum") != "Nenhum"
+            and self.config.get("volume", 80) > 0
+        )
+
+    def _iniciar_ambiente(self) -> None:
+        """Liga o som ambiente, se configurado e se o foco segue rodando."""
+        if self.rodando and self.estado == FOCO and self._ambiente_ligado():
+            sons.tocar_ambiente(
+                self.config["som_ambiente"], self.config.get("volume", 80),
+            )
 
     def _bloquear_tarefa(self, bloquear: bool) -> None:
         """Trava o combobox durante a contagem (valor fixo)."""
@@ -673,11 +964,14 @@ class FocoPomodoro:
             self._concluir_ciclo()
             return
         self._atualizar_visor()
-        # Bipe nos últimos 3 segundos antes de finalizar.
+        # Bipe nos últimos 3 segundos antes de finalizar. Com som ambiente
+        # ativo no foco, os bipes são pulados: o winsound só toca um som por
+        # vez e cada bipe mataria o loop ambiente.
         if (
             self.config.get("som_ao_terminar")
             and self.config.get("bipe_contagem_regressiva")
             and self.segundos_restantes in (1, 2, 3)
+            and not (self.estado == FOCO and self._ambiente_ligado())
         ):
             sons.tocar_tique(self.config.get("volume", 80))
         self.segundos_restantes -= 1
@@ -698,17 +992,30 @@ class FocoPomodoro:
             )
             sons.tocar(nome_som, self.config.get("volume", 80))
 
+        prorrogacao = self._prorrogacao
+        self._prorrogacao = False
+
         if terminou_foco:
-            # Registra o pomodoro concluído.
-            db.registrar_pomodoro(
-                tarefa, self.config["pomodoro_min"],
-                dias_manter=self.config.get("dias_historico", 30),
-            )
-            self.pomodoros_concluidos_sessao += 1
-            self.lbl_sessao.config(
-                text=f"Pomodoros nesta sessão: {self.pomodoros_concluidos_sessao}"
-            )
+            if prorrogacao:
+                # Fim de um "+5 min": grava só os minutos extras, sem contar
+                # como um novo pomodoro (o original já foi contabilizado).
+                db.registrar_pomodoro(
+                    tarefa, self.segundos_totais // 60,
+                    dias_manter=self.config.get("dias_historico", 30),
+                    parcial=True,
+                )
+            else:
+                # Registra o pomodoro concluído.
+                db.registrar_pomodoro(
+                    tarefa, self.config["pomodoro_min"],
+                    dias_manter=self.config.get("dias_historico", 30),
+                )
+                self.pomodoros_concluidos_sessao += 1
+                self.lbl_sessao.config(
+                    text=f"Pomodoros nesta sessão: {self.pomodoros_concluidos_sessao}"
+                )
             self._atualizar_aba_historico()
+            self._verificar_meta_diaria()
 
         proximo = self._proximo_estado()
 
@@ -727,13 +1034,42 @@ class FocoPomodoro:
             cor = COR_INTERVALO
 
         # Notificação no canto (Windows) e/ou aviso grande no centro.
+        # No fim de um foco, o aviso central oferece prorrogar por +5 min.
         self._notificar(titulo, msg)
         if self.config.get("aviso_central"):
-            self._mostrar_aviso_central(titulo, msg, cor)
+            self._mostrar_aviso_central(
+                titulo, msg, cor,
+                ao_prorrogar=self._prorrogar_foco if terminou_foco else None,
+            )
 
         self._preparar_estado(proximo)
-        # Inicia automaticamente o próximo ciclo (a tarefa já está preenchida).
+        # Inicia o próximo ciclo, a menos que o auto-início esteja desligado.
+        if self.config.get("auto_iniciar", True):
+            self._iniciar()
+
+    def _prorrogar_foco(self) -> None:
+        """Continua focando pelos minutos de prorrogação configurados
+        após o fim de um pomodoro. O intervalo que estava por vir
+        acontece normalmente depois."""
+        self._pausar()  # interrompe o intervalo que possa ter começado
+        self._prorrogacao = True
+        self.estado = FOCO
+        self.segundos_totais = max(1, int(self.config.get("prorrogacao_min", 5))) * 60
+        self.segundos_restantes = self.segundos_totais
+        self.lbl_estado.config(text="FOCO", fg=COR_FOCO)
+        self._definir_cor_anel(COR_FOCO)
+        self._atualizar_visor()
         self._iniciar()
+
+    def _verificar_meta_diaria(self) -> None:
+        """Avisa (uma vez) quando a meta diária de pomodoros é atingida."""
+        meta = int(self.config.get("meta_pomodoros_dia", 0) or 0)
+        self._atualizar_rotulo_meta()
+        if meta > 0 and db.pomodoros_do_dia() == meta:
+            self._notificar(
+                "Meta diária atingida! 🎉",
+                f"Você completou seus {meta} pomodoros de hoje. Parabéns!",
+            )
 
     def _proximo_estado(self) -> str:
         if self.estado != FOCO:
@@ -759,18 +1095,45 @@ class FocoPomodoro:
             cor, rotulo = COR_INTERVALO, "INTERVALO"
 
         self.lbl_estado.config(text=rotulo, fg=cor)
-        self.canvas.itemconfig(self.arco_progresso, outline=cor)
+        self._definir_cor_anel(cor)
         self._atualizar_visor()
+
+    def _definir_cor_anel(self, cor: str) -> None:
+        self.canvas.itemconfig(self.arco_progresso, outline=cor)
+        self.canvas.itemconfig(self.cap_inicio, fill=cor)
+        self.canvas.itemconfig(self.cap_fim, fill=cor)
+
+    def _registrar_foco_parcial(self) -> None:
+        """Aproveita o tempo já focado quando um foco é abandonado no meio.
+
+        Grava um registro marcado como parcial se houver ao menos 1 minuto
+        decorrido — assim os minutos não se perdem, mas o registro não conta
+        como pomodoro completo (meta, streak e contagens ignoram parciais)."""
+        if self.estado != FOCO:
+            return
+        decorrido = self.segundos_totais - self.segundos_restantes
+        if decorrido < 60:
+            return
+        tarefa = self.var_tarefa.get().strip() or "(sem descrição)"
+        db.registrar_pomodoro(
+            tarefa, decorrido // 60,
+            dias_manter=self.config.get("dias_historico", 30),
+            parcial=True,
+        )
+        self._atualizar_aba_historico()
 
     def reiniciar_ciclo(self) -> None:
         """Volta o ciclo atual ao tempo cheio, sem perder o estado."""
         self._pausar()
+        self._registrar_foco_parcial()
         self.segundos_restantes = self.segundos_totais
         self._atualizar_visor()
 
     def pular_ciclo(self) -> None:
-        """Pula direto para o próximo estado, sem registrar foco incompleto."""
+        """Pula para o próximo estado, aproveitando o foco parcial se houver."""
         self._pausar()
+        self._registrar_foco_parcial()
+        self._prorrogacao = False
         self._preparar_estado(self._proximo_estado())
 
     # ===================================================================== #
@@ -781,11 +1144,16 @@ class FocoPomodoro:
         self.canvas.itemconfig(self.txt_tempo, text=f"{minutos:02d}:{segundos:02d}")
 
         # Rótulo do ciclo central.
-        if self.estado == FOCO:
+        if self.estado != FOCO:
+            self.canvas.itemconfig(self.txt_ciclo, text="Respire um pouco")
+        elif self._prorrogacao:
+            self.canvas.itemconfig(
+                self.txt_ciclo,
+                text=f"Prorrogação ➕{self.segundos_totais // 60} min",
+            )
+        else:
             n = self.pomodoros_concluidos_sessao + 1
             self.canvas.itemconfig(self.txt_ciclo, text=f"Pomodoro {n}")
-        else:
-            self.canvas.itemconfig(self.txt_ciclo, text="Respire um pouco")
 
         # Arco proporcional ao tempo decorrido.
         if self.segundos_totais > 0:
@@ -794,6 +1162,24 @@ class FocoPomodoro:
             fracao = 0
         extent = -359.999 * fracao  # sentido horário a partir do topo
         self.canvas.itemconfig(self.arco_progresso, extent=extent)
+
+        # Reposiciona as pontas arredondadas (início fixo no topo, fim
+        # acompanhando o progresso).
+        if fracao > 0:
+            centro = self.tamanho_anel / 2
+            meia = 7  # metade da espessura do anel
+            for item, ang_graus in (
+                (self.cap_inicio, 90.0),
+                (self.cap_fim, 90.0 + extent),
+            ):
+                ang = math.radians(ang_graus)
+                x = centro + self.raio_anel * math.cos(ang)
+                y = centro - self.raio_anel * math.sin(ang)
+                self.canvas.coords(item, x - meia, y - meia, x + meia, y + meia)
+                self.canvas.itemconfig(item, state="normal")
+        else:
+            self.canvas.itemconfig(self.cap_inicio, state="hidden")
+            self.canvas.itemconfig(self.cap_fim, state="hidden")
 
     def _atualizar_aba_historico(self) -> None:
         historico = db.carregar_historico()
@@ -831,6 +1217,8 @@ class FocoPomodoro:
             registros = [r for r in registros if r["data"][:10] == dia_sel]
         if tarefa_sel != self.FILTRO_TODAS_TAREFAS:
             registros = [r for r in registros if r["tarefa"] == tarefa_sel]
+        # Conjunto exibido; é este que o "Exportar CSV" salva.
+        self._registros_filtrados = registros
 
         # Totais recalculados sobre o conjunto filtrado.
         total_min = sum(int(r.get("duracao_min", 0)) for r in registros)
@@ -843,9 +1231,14 @@ class FocoPomodoro:
         for item in self.tabela.get_children():
             self.tabela.delete(item)
         for reg in reversed(registros):
+            parcial = bool(reg.get("parcial"))
             self.tabela.insert(
                 "", "end",
-                values=(reg["data"], reg["tarefa"], reg["duracao_min"]),
+                values=(
+                    reg["data"], reg["tarefa"],
+                    f"{reg['duracao_min']} ◐" if parcial else reg["duracao_min"],
+                ),
+                tags=("parcial",) if parcial else (),
             )
 
     # ===================================================================== #
@@ -868,6 +1261,10 @@ class FocoPomodoro:
             "notificacao_windows": bool(self.var_notificacao.get()),
             "aviso_central": bool(self.var_aviso_central.get()),
             "dias_historico": int(self.var_dias_historico.get() or 30),
+            "auto_iniciar": bool(self.var_auto_iniciar.get()),
+            "prorrogacao_min": int(self.var_prorrogacao_min.get()),
+            "som_ambiente": self.var_som_ambiente.get(),
+            "meta_pomodoros_dia": int(self.var_meta.get()),
         }
 
     def _config_tem_alteracoes(self) -> bool:
@@ -886,6 +1283,7 @@ class FocoPomodoro:
         # Aplica imediatamente o novo limite de retenção do histórico.
         db.podar_historico(self.config["dias_historico"])
         self._atualizar_aba_historico()
+        self._atualizar_rotulo_meta()
 
         # Se o timer estiver parado, aplica o novo tempo ao ciclo atual.
         if not self.rodando:
@@ -911,6 +1309,10 @@ class FocoPomodoro:
         self.var_notificacao.set(self.config["notificacao_windows"])
         self.var_aviso_central.set(self.config["aviso_central"])
         self.var_dias_historico.set(str(self.config["dias_historico"]))
+        self.var_auto_iniciar.set(self.config["auto_iniciar"])
+        self.var_prorrogacao_min.set(self.config["prorrogacao_min"])
+        self.var_som_ambiente.set(self.config["som_ambiente"])
+        self.var_meta.set(self.config["meta_pomodoros_dia"])
 
     def _tratar_config_pendente(self) -> bool:
         """Se houver alterações não salvas na aba Configurações, pergunta o
@@ -941,6 +1343,10 @@ class FocoPomodoro:
                 # Cancelou -> traz de volta para a aba de Configurações.
                 self._aba_atual = self._idx_config
                 self.abas.select(self._idx_config)
+                return
+        # Estatísticas sempre recalculadas ao entrar na aba.
+        if atual == self._idx_stats:
+            self._atualizar_estatisticas()
 
     # --------------------- Lista de tarefas (combobox) ------------------- #
     def _recarregar_lista_tarefas(self) -> None:
@@ -984,6 +1390,44 @@ class FocoPomodoro:
         self._atualizar_combo_tarefas()
         self._avisar_tarefa(f"✓ “{nova}” adicionado.")
 
+    def _renomear_tarefa(self) -> None:
+        """Renomeia a tarefa selecionada, inclusive nos registros antigos."""
+        selecao = self.lista_tarefas.curselection()
+        if not selecao:
+            self._avisar_tarefa("Selecione um item na lista para renomear.")
+            return
+        idx = selecao[0]
+        tarefas = self.config.get("tarefas", [])
+        if not (0 <= idx < len(tarefas)):
+            return
+        antigo = tarefas[idx]
+        novo = simpledialog.askstring(
+            "Renomear tarefa", f"Novo nome para “{antigo}”:",
+            initialvalue=antigo, parent=self.root,
+        )
+        if novo is None:
+            return
+        novo = novo.strip()
+        if not novo or novo == antigo:
+            return
+        if novo in tarefas:
+            self._avisar_tarefa("Já existe um item com esse nome.")
+            return
+
+        tarefas[idx] = novo
+        if self.config.get("tarefa_selecionada") == antigo:
+            self.config["tarefa_selecionada"] = novo
+        if self.var_tarefa.get() == antigo:
+            self.var_tarefa.set(novo)
+        db.salvar_config(self.config)
+        alterados = db.renomear_tarefa_historico(antigo, novo)
+
+        self._recarregar_lista_tarefas()
+        self._atualizar_combo_tarefas()
+        self._atualizar_aba_historico()
+        extra = f" ({alterados} registro(s) atualizados)" if alterados else ""
+        self._avisar_tarefa(f"✓ “{antigo}” → “{novo}”{extra}.")
+
     def _remover_tarefa(self) -> None:
         selecao = self.lista_tarefas.curselection()
         if not selecao:
@@ -997,6 +1441,44 @@ class FocoPomodoro:
             self._recarregar_lista_tarefas()
             self._atualizar_combo_tarefas()
             self._avisar_tarefa(f"✓ “{removido}” removido.")
+
+    def exportar_csv(self) -> None:
+        """Salva em CSV os registros atualmente exibidos (com os filtros)."""
+        registros = getattr(self, "_registros_filtrados", [])
+        if not registros:
+            messagebox.showinfo(
+                "Exportar CSV",
+                "Não há registros para exportar com os filtros atuais.",
+            )
+            return
+        caminho = filedialog.asksaveasfilename(
+            title="Exportar histórico",
+            defaultextension=".csv",
+            filetypes=[("Planilha CSV", "*.csv"), ("Todos os arquivos", "*.*")],
+            initialfile=f"foco_pomodoro_{date.today().isoformat()}.csv",
+        )
+        if not caminho:
+            return
+        try:
+            # utf-8-sig + ponto e vírgula: abre certinho no Excel brasileiro.
+            with open(caminho, "w", newline="", encoding="utf-8-sig") as f:
+                escritor = csv.writer(f, delimiter=";")
+                escritor.writerow(["Data", "Tarefa", "Minutos", "Parcial"])
+                for r in registros:
+                    escritor.writerow([
+                        r.get("data", ""), r.get("tarefa", ""),
+                        r.get("duracao_min", 0),
+                        "sim" if r.get("parcial") else "não",
+                    ])
+        except OSError as erro:
+            messagebox.showerror(
+                "Exportar CSV", f"Não foi possível salvar o arquivo:\n{erro}",
+            )
+            return
+        messagebox.showinfo(
+            "Exportar CSV",
+            f"{len(registros)} registro(s) exportado(s) para:\n{caminho}",
+        )
 
     def limpar_dados(self) -> None:
         if messagebox.askyesno(
@@ -1014,8 +1496,13 @@ class FocoPomodoro:
         if self.config.get("notificacao_windows"):
             notificacao.notificar(titulo, mensagem)
 
-    def _mostrar_aviso_central(self, titulo: str, mensagem: str, cor: str) -> None:
-        """Janela grande, centralizada, sempre no topo, fixa até o usuário fechar."""
+    def _mostrar_aviso_central(
+        self, titulo: str, mensagem: str, cor: str, ao_prorrogar=None,
+    ) -> None:
+        """Janela grande, centralizada, sempre no topo, fixa até o usuário fechar.
+
+        Se `ao_prorrogar` for passado (fim de pomodoro), mostra também um
+        botão para continuar focando por mais 5 minutos."""
         # Evita acumular várias janelas: fecha a anterior, se houver.
         anterior = getattr(self, "_janela_aviso", None)
         if anterior is not None:
@@ -1053,9 +1540,20 @@ class FocoPomodoro:
             interno, text=mensagem, font=(FONTE, 15),
             fg=COR_TEXTO, bg=COR_FUNDO, wraplength=largura - 80,
         ).pack(pady=(0, 30))
+
+        botoes = tk.Frame(interno, bg=COR_FUNDO)
+        botoes.pack()
         self._criar_botao(
-            interno, "Fechar", win.destroy, cor=cor, principal=True,
-        ).pack()
+            botoes, "Fechar", win.destroy, cor=cor, principal=True,
+        ).pack(side="left")
+        if ao_prorrogar is not None:
+            def _prorrogar():
+                win.destroy()
+                ao_prorrogar()
+            minutos = max(1, int(self.config.get("prorrogacao_min", 5)))
+            self._criar_botao(
+                botoes, f"➕ {minutos} min de foco", _prorrogar,
+            ).pack(side="left", padx=(10, 0))
 
         # Força ficar acima de todas as aplicações.
         win.attributes("-topmost", True)
@@ -1081,6 +1579,8 @@ def main() -> None:
             "Sair", "O timer está rodando. Deseja realmente sair?"
         ):
             return
+        # Aproveita o tempo de um foco interrompido pelo fechamento.
+        app._registrar_foco_parcial()
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", ao_fechar)
