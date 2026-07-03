@@ -1225,7 +1225,10 @@ class FocoPomodoro:
         horas, minutos = divmod(total_min, 60)
         texto_tempo = f"{horas}h {minutos}min" if horas else f"{minutos} min"
         self.cartao_total_foco.lbl_valor.config(text=texto_tempo)
-        self.cartao_qtd.lbl_valor.config(text=str(len(registros)))
+        # Parciais (prorrogações e focos interrompidos) somam minutos,
+        # mas não contam como pomodoro concluído.
+        completos = sum(1 for r in registros if not r.get("parcial"))
+        self.cartao_qtd.lbl_valor.config(text=str(completos))
 
         # Recarrega a tabela (mais recentes no topo).
         for item in self.tabela.get_children():
