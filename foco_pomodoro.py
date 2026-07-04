@@ -7,6 +7,10 @@ Recursos:
     desligar o início automático do próximo ciclo.
   * Campo de descrição preenchido antes de iniciar (estudos, trabalho...).
   * Histórico persistente em JSON com tempo total de foco e exportação CSV.
+  * Edição/remoção de registros individuais na aba Histórico (duplo clique,
+    botão direito ou botões Editar/Remover), com estatísticas recalculadas.
+  * Inclusão manual de registros no histórico (botão Adicionar), para
+    contabilizar focos feitos longe do computador.
   * Foco interrompido no meio é aproveitado como registro parcial (◐).
   * Aba Estatísticas: gráfico dos últimos 14 dias, sequência de dias
     (streak), meta diária de pomodoros e média por dia.
@@ -24,7 +28,7 @@ from __future__ import annotations
 import csv
 import math
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -311,7 +315,8 @@ class FocoPomodoro:
         self.lbl_meta.pack(pady=(2, 10))
         self._atualizar_rotulo_meta()
 
-    def _criar_botao(self, pai, texto, comando, cor=None, principal=False):
+    def _criar_botao(self, pai, texto, comando, cor=None, principal=False,
+                     padx=16, pady=10):
         botao = tk.Button(
             pai, text=texto, command=comando,
             font=(FONTE, 11, "bold" if principal else "normal"),
@@ -319,7 +324,7 @@ class FocoPomodoro:
             bg=cor or COR_BOTAO,
             activebackground=cor or COR_BOTAO_ATIVO,
             activeforeground=COR_FUNDO if principal else COR_TEXTO,
-            relief="flat", bd=0, padx=16, pady=10, cursor="hand2",
+            relief="flat", bd=0, padx=padx, pady=pady, cursor="hand2",
         )
         # Hover: clareia o fundo enquanto o mouse está sobre o botão.
         base = cor or COR_BOTAO
@@ -349,13 +354,22 @@ class FocoPomodoro:
         cartoes.columnconfigure(0, weight=1)
         cartoes.columnconfigure(1, weight=1)
 
-        # Cabeçalho "Registros".
+        # Cabeçalho "Registros" com botões para editar/remover o selecionado.
         cab = tk.Frame(f, bg=COR_FUNDO)
         cab.pack(fill="x", padx=20, pady=(8, 4))
         tk.Label(
             cab, text="Registros", font=(FONTE, 12, "bold"),
             fg=COR_TEXTO, bg=COR_FUNDO,
         ).pack(side="left")
+        self._criar_botao(
+            cab, "🗑 Remover", self._remover_registro, padx=10, pady=3,
+        ).pack(side="right")
+        self._criar_botao(
+            cab, "✏ Editar", self._editar_registro, padx=10, pady=3,
+        ).pack(side="right", padx=(0, 6))
+        self._criar_botao(
+            cab, "➕ Novo", self._adicionar_registro, padx=10, pady=3,
+        ).pack(side="right", padx=(0, 6))
 
         # Linha de filtros: por dia e por tarefa.
         # O filtro por dia inicia no dia atual; o de tarefa em "todas".
@@ -426,6 +440,34 @@ class FocoPomodoro:
         self.tabela.configure(yscrollcommand=scroll.set)
         self.tabela.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
+
+        # Atalhos na tabela: duplo clique edita, Delete remove e o botão
+        # direito abre um menu com as duas ações.
+        self.menu_registro = tk.Menu(
+            self.tabela, tearoff=0, bg=COR_PAINEL, fg=COR_TEXTO,
+            activebackground=COR_FOCO, activeforeground=COR_FUNDO,
+            font=(FONTE, 10), bd=0,
+        )
+        self.menu_registro.add_command(
+            label="✏  Editar registro", command=self._editar_registro,
+        )
+        self.menu_registro.add_command(
+            label="🗑  Remover registro", command=self._remover_registro,
+        )
+
+        def _abrir_menu(evento):
+            iid = self.tabela.identify_row(evento.y)
+            if iid:
+                self.tabela.selection_set(iid)
+                self.menu_registro.tk_popup(evento.x_root, evento.y_root)
+
+        def _duplo_clique(evento):
+            if self.tabela.identify_row(evento.y):
+                self._editar_registro()
+
+        self.tabela.bind("<Button-3>", _abrir_menu)
+        self.tabela.bind("<Double-1>", _duplo_clique)
+        self.tabela.bind("<Delete>", lambda e: self._remover_registro())
 
         botoes_hist = tk.Frame(f, bg=COR_FUNDO)
         botoes_hist.pack(pady=12)
@@ -1183,6 +1225,9 @@ class FocoPomodoro:
 
     def _atualizar_aba_historico(self) -> None:
         historico = db.carregar_historico()
+        # Lista completa em memória: editar/remover um registro altera esta
+        # lista e a regrava por inteiro no arquivo.
+        self._historico_completo = historico
 
         # Dias distintos presentes no histórico (parte AAAA-MM-DD da data),
         # do mais recente para o mais antigo, para alimentar o filtro.
@@ -1230,12 +1275,14 @@ class FocoPomodoro:
         completos = sum(1 for r in registros if not r.get("parcial"))
         self.cartao_qtd.lbl_valor.config(text=str(completos))
 
-        # Recarrega a tabela (mais recentes no topo).
+        # Recarrega a tabela (mais recentes no topo), guardando qual registro
+        # corresponde a cada linha para as ações de editar/remover.
         for item in self.tabela.get_children():
             self.tabela.delete(item)
+        self._registro_por_item = {}
         for reg in reversed(registros):
             parcial = bool(reg.get("parcial"))
-            self.tabela.insert(
+            iid = self.tabela.insert(
                 "", "end",
                 values=(
                     reg["data"], reg["tarefa"],
@@ -1243,6 +1290,298 @@ class FocoPomodoro:
                 ),
                 tags=("parcial",) if parcial else (),
             )
+            self._registro_por_item[iid] = reg
+
+    # ------------------ Edição/remoção de registros ---------------------- #
+    def _apos_alterar_historico(self) -> None:
+        """Reflete uma alteração do histórico em todas as telas de uma vez:
+        tabela/cartões do Histórico, aba Estatísticas e meta da aba Timer."""
+        self._atualizar_aba_historico()
+        self._atualizar_estatisticas()
+        self._atualizar_rotulo_meta()
+
+    def _registro_selecionado(self) -> dict | None:
+        """Registro correspondente à linha selecionada na tabela (ou None)."""
+        selecao = self.tabela.selection()
+        if not selecao:
+            messagebox.showinfo(
+                "Registros",
+                "Selecione um registro na tabela primeiro.",
+                parent=self.root,
+            )
+            return None
+        return self._registro_por_item.get(selecao[0])
+
+    def _remover_registro(self) -> None:
+        """Apaga o registro selecionado (com confirmação)."""
+        reg = self._registro_selecionado()
+        if reg is None:
+            return
+        if not messagebox.askyesno(
+            "Remover registro",
+            "Remover este registro do histórico?\n\n"
+            f"{reg.get('data', '')}  ·  {reg.get('tarefa', '')}  ·  "
+            f"{reg.get('duracao_min', 0)} min\n\n"
+            "Esta ação não pode ser desfeita.",
+            parent=self.root,
+        ):
+            return
+        try:
+            self._historico_completo.remove(reg)
+        except ValueError:
+            pass  # já não está mais na lista (ex.: histórico recarregado)
+        db.salvar_historico(self._historico_completo)
+        self._apos_alterar_historico()
+
+    def _adicionar_registro(self) -> None:
+        """Janela para incluir manualmente um pomodoro no histórico
+        (ex.: um foco feito longe do computador)."""
+        win = tk.Toplevel(self.root)
+        win.title("Adicionar registro")
+        win.configure(bg=COR_FUNDO)
+        win.resizable(False, False)
+        win.transient(self.root)
+
+        largura, altura = 340, 380
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - largura) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - altura) // 3
+        win.geometry(f"{largura}x{altura}+{x}+{max(0, y)}")
+
+        interno = tk.Frame(win, bg=COR_FUNDO)
+        interno.pack(fill="both", expand=True, padx=20, pady=16)
+
+        def _entrada(pai, variavel, largura_chars):
+            return tk.Entry(
+                pai, textvariable=variavel, width=largura_chars,
+                font=(FONTE, 11), justify="center",
+                bg=COR_PAINEL, fg=COR_TEXTO, relief="flat",
+                insertbackground=COR_TEXTO,
+                highlightthickness=1, highlightbackground=COR_TRILHA,
+                highlightcolor=COR_FOCO,
+            )
+
+        # Data e hora, já preenchidas com o momento atual.
+        agora = datetime.now()
+        linha_dt = tk.Frame(interno, bg=COR_FUNDO)
+        linha_dt.pack(fill="x")
+        col_data = tk.Frame(linha_dt, bg=COR_FUNDO)
+        col_data.pack(side="left")
+        tk.Label(
+            col_data, text="Data (AAAA-MM-DD)", font=(FONTE, 10),
+            fg=COR_TEXTO, bg=COR_FUNDO,
+        ).pack(anchor="w", pady=(0, 2))
+        var_data = tk.StringVar(value=agora.strftime("%Y-%m-%d"))
+        _entrada(col_data, var_data, 12).pack(anchor="w", ipady=4)
+        col_hora = tk.Frame(linha_dt, bg=COR_FUNDO)
+        col_hora.pack(side="left", padx=(14, 0))
+        tk.Label(
+            col_hora, text="Hora (HH:MM)", font=(FONTE, 10),
+            fg=COR_TEXTO, bg=COR_FUNDO,
+        ).pack(anchor="w", pady=(0, 2))
+        var_hora = tk.StringVar(value=agora.strftime("%H:%M"))
+        _entrada(col_hora, var_hora, 7).pack(anchor="w", ipady=4)
+
+        # Tarefa: mesmas sugestões da janela de edição; começa na tarefa
+        # selecionada na aba Timer.
+        tk.Label(
+            interno, text="Tarefa", font=(FONTE, 10),
+            fg=COR_TEXTO, bg=COR_FUNDO,
+        ).pack(anchor="w", pady=(12, 2))
+        sugestoes = sorted(
+            set(self.config.get("tarefas", []))
+            | {r.get("tarefa", "") for r in self._historico_completo} - {""}
+        )
+        var_tarefa = tk.StringVar(value=self.var_tarefa.get())
+        combo = ttk.Combobox(
+            interno, textvariable=var_tarefa, values=sugestoes,
+            font=(FONTE, 11),
+        )
+        combo.pack(fill="x", ipady=4)
+
+        tk.Label(
+            interno, text="Duração (min)", font=(FONTE, 10),
+            fg=COR_TEXTO, bg=COR_FUNDO,
+        ).pack(anchor="w", pady=(12, 2))
+        var_min = tk.StringVar(value=str(self.config["pomodoro_min"]))
+        tk.Spinbox(
+            interno, from_=1, to=600, textvariable=var_min,
+            width=6, font=(FONTE, 11), justify="center",
+            bg=COR_PAINEL, fg=COR_TEXTO, buttonbackground=COR_BOTAO,
+            relief="flat", insertbackground=COR_TEXTO,
+            highlightthickness=1, highlightbackground=COR_TRILHA,
+        ).pack(anchor="w")
+
+        # Parcial: soma minutos, mas não conta como pomodoro completo.
+        var_parcial = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            interno, text="Registro parcial ◐ (não conta na meta/sequência)",
+            variable=var_parcial, font=(FONTE, 9),
+            fg=COR_TEXTO_FRACO, bg=COR_FUNDO, selectcolor=COR_PAINEL,
+            activebackground=COR_FUNDO, activeforeground=COR_TEXTO,
+            anchor="w", highlightthickness=0, bd=0,
+        ).pack(fill="x", pady=(10, 0))
+
+        lbl_erro = tk.Label(
+            interno, text="", font=(FONTE, 9), fg=COR_FOCO, bg=COR_FUNDO,
+            wraplength=largura - 50, justify="left",
+        )
+        lbl_erro.pack(anchor="w", pady=(8, 0))
+
+        def _salvar():
+            try:
+                momento = datetime.strptime(
+                    f"{var_data.get().strip()} {var_hora.get().strip()}",
+                    "%Y-%m-%d %H:%M",
+                )
+            except ValueError:
+                lbl_erro.config(
+                    text="Data/hora inválidas. Use os formatos "
+                         "AAAA-MM-DD e HH:MM (ex.: 2026-07-04 e 09:30).",
+                )
+                return
+            dias_manter = int(self.config.get("dias_historico", 30) or 0)
+            if dias_manter > 0 and momento < datetime.now() - timedelta(days=dias_manter):
+                lbl_erro.config(
+                    text=f"Data anterior ao limite de {dias_manter} dias do "
+                         "histórico: o registro seria apagado automaticamente. "
+                         "Ajuste a data ou o limite nas Configurações.",
+                )
+                return
+            tarefa = var_tarefa.get().strip()
+            if not tarefa:
+                lbl_erro.config(text="Informe o nome da tarefa.")
+                return
+            try:
+                minutos = int(var_min.get())
+            except ValueError:
+                lbl_erro.config(text="Duração inválida: use um número de minutos.")
+                return
+            if not (1 <= minutos <= 600):
+                lbl_erro.config(text="A duração deve ficar entre 1 e 600 minutos.")
+                return
+
+            registro = db.adicionar_registro(
+                momento.strftime("%Y-%m-%d %H:%M"), tarefa, minutos,
+                parcial=var_parcial.get(),
+            )
+            win.destroy()
+            # Ajusta os filtros para o registro recém-criado ficar visível.
+            self.var_filtro_dia.set(registro["data"][:10])
+            if self.var_filtro_tarefa.get() not in (
+                self.FILTRO_TODAS_TAREFAS, registro["tarefa"],
+            ):
+                self.var_filtro_tarefa.set(self.FILTRO_TODAS_TAREFAS)
+            self._apos_alterar_historico()
+
+        botoes = tk.Frame(interno, bg=COR_FUNDO)
+        botoes.pack(pady=(10, 0))
+        self._criar_botao(
+            botoes, "➕ Adicionar", _salvar, cor=COR_INTERVALO, principal=True,
+        ).pack(side="left")
+        self._criar_botao(
+            botoes, "Cancelar", win.destroy,
+        ).pack(side="left", padx=(10, 0))
+
+        win.bind("<Return>", lambda e: _salvar())
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.grab_set()
+        combo.focus_set()
+
+    def _editar_registro(self) -> None:
+        """Janela para alterar a tarefa e a duração do registro selecionado."""
+        reg = self._registro_selecionado()
+        if reg is None:
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("Editar registro")
+        win.configure(bg=COR_FUNDO)
+        win.resizable(False, False)
+        win.transient(self.root)
+
+        largura, altura = 340, 300
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - largura) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - altura) // 3
+        win.geometry(f"{largura}x{altura}+{x}+{max(0, y)}")
+
+        interno = tk.Frame(win, bg=COR_FUNDO)
+        interno.pack(fill="both", expand=True, padx=20, pady=16)
+
+        rotulo_data = reg.get("data", "")
+        if reg.get("parcial"):
+            rotulo_data += "   ·   parcial ◐"
+        tk.Label(
+            interno, text=rotulo_data, font=(FONTE, 9),
+            fg=COR_TEXTO_FRACO, bg=COR_FUNDO,
+        ).pack(anchor="w")
+
+        # Tarefa: campo livre com sugestões (lista das Configurações +
+        # nomes que já aparecem no histórico).
+        tk.Label(
+            interno, text="Tarefa", font=(FONTE, 10),
+            fg=COR_TEXTO, bg=COR_FUNDO,
+        ).pack(anchor="w", pady=(12, 2))
+        sugestoes = sorted(
+            set(self.config.get("tarefas", []))
+            | {r.get("tarefa", "") for r in self._historico_completo} - {""}
+        )
+        var_tarefa = tk.StringVar(value=reg.get("tarefa", ""))
+        combo = ttk.Combobox(
+            interno, textvariable=var_tarefa, values=sugestoes,
+            font=(FONTE, 11),
+        )
+        combo.pack(fill="x", ipady=4)
+
+        tk.Label(
+            interno, text="Duração (min)", font=(FONTE, 10),
+            fg=COR_TEXTO, bg=COR_FUNDO,
+        ).pack(anchor="w", pady=(12, 2))
+        var_min = tk.StringVar(value=str(reg.get("duracao_min", 0)))
+        tk.Spinbox(
+            interno, from_=1, to=600, textvariable=var_min,
+            width=6, font=(FONTE, 11), justify="center",
+            bg=COR_PAINEL, fg=COR_TEXTO, buttonbackground=COR_BOTAO,
+            relief="flat", insertbackground=COR_TEXTO,
+            highlightthickness=1, highlightbackground=COR_TRILHA,
+        ).pack(anchor="w")
+
+        lbl_erro = tk.Label(
+            interno, text="", font=(FONTE, 9), fg=COR_FOCO, bg=COR_FUNDO,
+        )
+        lbl_erro.pack(anchor="w", pady=(8, 0))
+
+        def _salvar():
+            tarefa = var_tarefa.get().strip()
+            if not tarefa:
+                lbl_erro.config(text="Informe o nome da tarefa.")
+                return
+            try:
+                minutos = int(var_min.get())
+            except ValueError:
+                lbl_erro.config(text="Duração inválida: use um número de minutos.")
+                return
+            if not (1 <= minutos <= 600):
+                lbl_erro.config(text="A duração deve ficar entre 1 e 600 minutos.")
+                return
+            reg["tarefa"] = tarefa
+            reg["duracao_min"] = minutos
+            db.salvar_historico(self._historico_completo)
+            win.destroy()
+            self._apos_alterar_historico()
+
+        botoes = tk.Frame(interno, bg=COR_FUNDO)
+        botoes.pack(pady=(10, 0))
+        self._criar_botao(
+            botoes, "💾 Salvar", _salvar, cor=COR_INTERVALO, principal=True,
+        ).pack(side="left")
+        self._criar_botao(
+            botoes, "Cancelar", win.destroy,
+        ).pack(side="left", padx=(10, 0))
+
+        win.bind("<Return>", lambda e: _salvar())
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.grab_set()
+        combo.focus_set()
 
     # ===================================================================== #
     # Ações de configuração e dados

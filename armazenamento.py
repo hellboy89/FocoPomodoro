@@ -165,6 +165,43 @@ def registrar_pomodoro(
     return registro
 
 
+def adicionar_registro(
+    data_texto: str, tarefa: str, duracao_min: int, parcial: bool = False,
+) -> dict:
+    """Insere um registro criado manualmente, mantendo a ordem cronológica.
+
+    Diferente de `registrar_pomodoro` (sempre "agora", no fim da lista),
+    aqui a data vem do usuário e o registro entra na posição certa para a
+    listagem do histórico continuar em ordem."""
+    historico = carregar_historico()
+    registro = {
+        "data": data_texto,
+        "tarefa": tarefa.strip() or "(sem descrição)",
+        "duracao_min": int(duracao_min),
+    }
+    if parcial:
+        registro["parcial"] = True
+
+    nova_data = _data_registro(registro)
+    posicao = len(historico)
+    if nova_data is not None:
+        for i, reg in enumerate(historico):
+            data = _data_registro(reg)
+            if data is not None and data > nova_data:
+                posicao = i
+                break
+    historico.insert(posicao, registro)
+    _gravar_json(ARQUIVO_HISTORICO, {"pomodoros": historico})
+    return registro
+
+
+def salvar_historico(historico: list[dict]) -> None:
+    """Regrava o arquivo de histórico com a lista fornecida.
+
+    Usado pela aba Histórico ao editar ou remover um registro específico."""
+    _gravar_json(ARQUIVO_HISTORICO, {"pomodoros": historico})
+
+
 def limpar_historico() -> None:
     """Apaga todos os registros (mantém o arquivo, vazio)."""
     _gravar_json(ARQUIVO_HISTORICO, {"pomodoros": []})
