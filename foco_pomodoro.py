@@ -38,6 +38,7 @@ from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 import armazenamento as db
 import bandeja
+import inicio_windows
 import notificacao
 import sons
 
@@ -58,6 +59,8 @@ COR_SCROLL_TRILHA = "#252838"  # fundo da barra de rolagem (escuro)
 COR_SCROLL = "#565c78"         # cursor da barra (claro, contrasta com a trilha)
 COR_SCROLL_ATIVO = "#727a9c"   # cursor ao passar/arrastar (mais claro)
 COR_DESTAQUE = "#f5a97f"       # âmbar: streak, meta e barra de hoje no gráfico
+COR_REINICIAR = "#e69c4a"      # âmbar: botão Reiniciar
+COR_PULAR = "#46b596"          # verde-menta: botão Pular (leva ao intervalo)
 
 # Linhas alternadas (efeito "zebra") do combobox "No que você vai focar?":
 # monocromático, alternando dois tons da MESMA cor — uma linha mais escura,
@@ -81,20 +84,6 @@ def _clarear(cor: str, fator: float = 0.16) -> str:
         min(255, int(c + (255 - c) * fator)) for c in (r, g, b)
     )
 
-
-def _tingir(cor: str, fundo: str = COR_FUNDO, fator: float = 0.80) -> str:
-    """Mistura uma cor viva com o fundo escuro, gerando um tom suave.
-
-    Usado para dar aos botões um fundo levemente colorido (tingido) sem
-    ofuscar a cor cheia do botão principal.
-    """
-    r, g, b = (int(cor[i:i + 2], 16) for i in (1, 3, 5))
-    fr, fg, fb = (int(fundo[i:i + 2], 16) for i in (1, 3, 5))
-    return "#%02x%02x%02x" % (
-        int(r + (fr - r) * fator),
-        int(g + (fg - g) * fator),
-        int(b + (fb - b) * fator),
-    )
 
 # Estados possíveis do ciclo.
 FOCO = "foco"
@@ -125,6 +114,13 @@ class FocoPomodoro:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.config = db.carregar_config()
+
+        # Migra a entrada antiga (nome compartilhado) para o nome único desta
+        # cópia e sincroniza a flag com o estado real do registro do Windows
+        # (que pode ter sido alterado por fora do app).
+        if inicio_windows.disponivel():
+            inicio_windows.migrar_legado()
+            self.config["iniciar_com_windows"] = inicio_windows.esta_ativo()
 
         # Ao abrir, já descarta registros de histórico além do limite salvo.
         db.podar_historico(self.config["dias_historico"])
@@ -249,6 +245,21 @@ class FocoPomodoro:
             ],
         )
 
+    def _detalhe_bandeja(self) -> str:
+        """Segunda linha do tooltip da bandeja: quanto falta para o ciclo
+        acabar, para consultar o tempo só passando o mouse sobre o ícone
+        (útil com a janela minimizada). Ex.: '23:45 restantes — Pomodoro 3'."""
+        minutos, segundos = divmod(max(0, self.segundos_restantes), 60)
+        detalhe = f"{minutos:02d}:{segundos:02d} restantes"
+        if not self.rodando:
+            detalhe += " (pausado)"
+        if self.estado == FOCO:
+            if self._prorrogacao:
+                detalhe += f" — Prorrogação ➕{self.segundos_totais // 60} min"
+            else:
+                detalhe += f" — Pomodoro {self.pomodoros_concluidos_sessao + 1}"
+        return detalhe
+
     def _atualizar_icone_bandeja(self) -> None:
         """Reflete o estado atual do timer em dois lugares, para sinalizar que
         o timer está em atividade e qual contagem corre:
@@ -269,7 +280,8 @@ class FocoPomodoro:
             estado, caminho = "intervalo", ICONE_INTERVALO
 
         # Ícone na bandeja do sistema (roda em thread própria; sempre seguro).
-        self.bandeja.atualizar(estado)
+        # O detalhe vira a 2ª linha do tooltip, com o tempo que falta.
+        self.bandeja.atualizar(estado, self._detalhe_bandeja())
 
         # Ícone da janela/barra de tarefas.
         if caminho == self._icone_atual:
@@ -293,15 +305,30 @@ class FocoPomodoro:
         except tk.TclError:
             pass
 
+    def _ao_fechar_janela(self) -> None:
+        """Ação do botão X da janela. Se a opção 'esconder na bandeja' estiver
+        ativa e o ícone estiver disponível, apenas oculta a janela (o timer
+        continua); caso contrário, encerra o app de fato."""
+        if self.config.get("minimizar_para_bandeja") and self.bandeja.disponivel:
+            try:
+                self.root.withdraw()
+                return
+            except tk.TclError:
+                pass  # sem janela para esconder: cai no encerramento normal
+        self.encerrar()
+
     def encerrar(self) -> None:
         """Fecha o app com as mesmas checagens do botão de fechar da janela
         (avisa sobre config não salva e sobre timer em andamento)."""
         # Avisa se há configurações alteradas e ainda não salvas.
         if not self._tratar_config_pendente():
             return
-        if self.rodando and not messagebox.askyesno(
-            "Sair", "O timer está rodando. Deseja realmente sair?"
-        ):
+        if self.rodando:
+            if not messagebox.askyesno(
+                "Sair", "O timer está rodando. Deseja realmente sair?"
+            ):
+                return
+        elif not messagebox.askyesno("Sair", "Tem certeza que deseja sair?"):
             return
         # Aproveita o tempo de um foco interrompido pelo fechamento.
         self._registrar_foco_parcial()
@@ -438,12 +465,12 @@ class FocoPomodoro:
 
         self._criar_botao(
             botoes, "⟳ Reiniciar", self.reiniciar_ciclo,
-            tint=COR_DESTAQUE,
+            cor=COR_REINICIAR, principal=True,
         ).grid(row=0, column=1, padx=5)
 
         self._criar_botao(
             botoes, "⏭ Pular", self.pular_ciclo,
-            tint=COR_INTERVALO,
+            cor=COR_PULAR, principal=True,
         ).grid(row=0, column=2, padx=5)
 
         self.lbl_sessao = tk.Label(
@@ -460,19 +487,17 @@ class FocoPomodoro:
         self.lbl_meta.pack(pady=(2, 10))
         self._atualizar_rotulo_meta()
 
-    def _criar_botao(self, pai, texto, comando, cor=None, tint=None,
+    def _criar_botao(self, pai, texto, comando, cor=None,
                      principal=False, padx=16, pady=10):
-        # Três estilos:
-        #  - principal: fundo cheio na cor (destaque máximo, ex.: Iniciar);
-        #  - tint: fundo suave tingido + texto na cor viva (ex.: Reiniciar/Pular);
+        # Dois estilos:
+        #  - principal: fundo cheio na cor viva + texto escuro. É o que dá
+        #    presença ao botão sobre o fundo escuro da janela, então vale para
+        #    todos os controles do timer (Iniciar/Reiniciar/Pular) e para a
+        #    ação em destaque de cada diálogo (Salvar, Adicionar...);
         #  - padrão: cinza neutro (demais botões do app).
         if principal:
             base = cor or COR_FOCO
             fg = fg_ativo = COR_FUNDO
-            negrito = "bold"
-        elif tint:
-            base = _tingir(tint)
-            fg = fg_ativo = tint
             negrito = "bold"
         else:
             base = cor or COR_BOTAO
@@ -1161,6 +1186,10 @@ class FocoPomodoro:
         self.var_aviso_central = tk.BooleanVar(value=self.config["aviso_central"])
         self.var_dias_historico = tk.StringVar(value=str(self.config["dias_historico"]))
         self.var_auto_iniciar = tk.BooleanVar(value=self.config["auto_iniciar"])
+        self.var_minimizar_bandeja = tk.BooleanVar(
+            value=self.config["minimizar_para_bandeja"])
+        self.var_iniciar_windows = tk.BooleanVar(
+            value=self.config["iniciar_com_windows"])
         self.var_prorrogacao_min = tk.IntVar(value=self.config["prorrogacao_min"])
         self.var_som_ambiente = tk.StringVar(value=self.config["som_ambiente"])
         self.var_meta = tk.IntVar(value=self.config["meta_pomodoros_dia"])
@@ -1322,6 +1351,49 @@ class FocoPomodoro:
             lambda: self._mostrar_aviso_central(
                 "Pomodoro concluído! 🍅", "Exemplo de aviso central.", COR_FOCO),
         ).pack(side="left", padx=(8, 0))
+
+        # ---- Sistema ----
+        self._titulo_secao(wrap, "🖥  Sistema")
+        self._linha_check(
+            wrap, "Ao fechar (X), esconder na bandeja em vez de sair",
+            self.var_minimizar_bandeja,
+        )
+        tk.Label(
+            wrap,
+            text=("Com esta opção, o botão X da janela apenas oculta o app na "
+                  "bandeja do sistema (ao lado do relógio) e o timer segue "
+                  "rodando. Para sair de vez, use 'Sair' no menu do ícone da "
+                  "bandeja."),
+            font=(FONTE, 9), fg=COR_TEXTO_FRACO, bg=COR_FUNDO,
+            justify="left", wraplength=360,
+        ).pack(anchor="w", pady=(0, 6))
+        self._linha_check(
+            wrap, "Iniciar automaticamente ao ligar o computador (logon)",
+            self.var_iniciar_windows,
+        )
+        tk.Label(
+            wrap,
+            text=("Registra o Foco Pomodoro para abrir sozinho quando você faz "
+                  "logon no Windows. Vale só para o seu usuário e não exige "
+                  "administrador. Cada cópia do app (ex.: desenvolvimento e "
+                  "produção) tem sua própria entrada, então uma não interfere "
+                  "na outra."),
+            font=(FONTE, 9), fg=COR_TEXTO_FRACO, bg=COR_FUNDO,
+            justify="left", wraplength=360,
+        ).pack(anchor="w", pady=(0, 4))
+        # Identifica qual instalação é esta e se ela está registrada no logon,
+        # para não haver dúvida de "qual cópia estou configurando".
+        tk.Label(
+            wrap, text=f"Esta cópia: {inicio_windows.PASTA}",
+            font=(FONTE, 9), fg=COR_TEXTO_FRACO, bg=COR_FUNDO,
+            justify="left", wraplength=360,
+        ).pack(anchor="w")
+        self.lbl_inicio_status = tk.Label(
+            wrap, text="", font=(FONTE, 9, "bold"), bg=COR_FUNDO,
+            justify="left", wraplength=360,
+        )
+        self.lbl_inicio_status.pack(anchor="w", pady=(0, 4))
+        self._atualizar_status_inicio()
 
         # ---- Histórico ----
         self._titulo_secao(wrap, "🗂  Histórico")
@@ -1604,6 +1676,7 @@ class FocoPomodoro:
             self._concluir_ciclo()
             return
         self._atualizar_visor()
+        self._atualizar_icone_bandeja()  # mantém o tooltip com o tempo certo
         # Bipe nos últimos 3 segundos antes de finalizar. Com som ambiente
         # ativo no foco, os bipes são pulados: o winsound só toca um som por
         # vez e cada bipe mataria o loop ambiente.
@@ -1769,8 +1842,31 @@ class FocoPomodoro:
         self._atualizar_aba_historico()
         self._atualizar_aba_jardim()
 
+    def _confirmar_interrupcao(self, titulo: str, acao: str) -> bool:
+        """Pede confirmação antes de descartar um foco em andamento.
+
+        Só pergunta quando há um pomodoro correndo de fato (FOCO rodando) —
+        durante os intervalos não há nada a perder, então o botão age direto.
+        Evita que um clique acidental transforme o pomodoro em um registro
+        parcial ◐, que não conta para a meta nem para o streak."""
+        if not self.rodando or self.estado != FOCO:
+            return True
+        decorrido = (self.segundos_totais - self.segundos_restantes) // 60
+        return messagebox.askyesno(
+            titulo,
+            f"O pomodoro está em andamento ({decorrido} min focados).\n\n"
+            f"{acao} agora, ele não será contabilizado como pomodoro "
+            "completo — os minutos já focados viram um registro parcial ◐.\n\n"
+            "Deseja continuar?",
+            default="no",
+            icon="warning",
+            parent=self.root,
+        )
+
     def reiniciar_ciclo(self) -> None:
         """Volta o ciclo atual ao tempo cheio, sem perder o estado."""
+        if not self._confirmar_interrupcao("Reiniciar", "Se você reiniciar"):
+            return
         self._pausar()
         self._registrar_foco_parcial()
         self.segundos_restantes = self.segundos_totais
@@ -1778,6 +1874,8 @@ class FocoPomodoro:
 
     def pular_ciclo(self) -> None:
         """Pula para o próximo estado, aproveitando o foco parcial se houver."""
+        if not self._confirmar_interrupcao("Pular", "Se você pular"):
+            return
         self._pausar()
         self._registrar_foco_parcial()
         self._prorrogacao = False
@@ -2269,6 +2367,8 @@ class FocoPomodoro:
             "aviso_central": bool(self.var_aviso_central.get()),
             "dias_historico": int(self.var_dias_historico.get() or 30),
             "auto_iniciar": bool(self.var_auto_iniciar.get()),
+            "minimizar_para_bandeja": bool(self.var_minimizar_bandeja.get()),
+            "iniciar_com_windows": bool(self.var_iniciar_windows.get()),
             "prorrogacao_min": int(self.var_prorrogacao_min.get()),
             "som_ambiente": self.var_som_ambiente.get(),
             "meta_pomodoros_dia": int(self.var_meta.get()),
@@ -2287,6 +2387,22 @@ class FocoPomodoro:
     def salvar_configuracoes(self) -> None:
         self.config.update(self._valores_config_atuais())
         db.salvar_config(self.config)
+
+        # Aplica o início automático no logon do Windows conforme a opção.
+        # Se falhar (ex.: sem acesso ao registro), reverte a flag salva para
+        # refletir a realidade e avisa o usuário.
+        quer_iniciar = self.config["iniciar_com_windows"]
+        if quer_iniciar != inicio_windows.esta_ativo():
+            if not inicio_windows.definir(quer_iniciar):
+                self.config["iniciar_com_windows"] = inicio_windows.esta_ativo()
+                self.var_iniciar_windows.set(self.config["iniciar_com_windows"])
+                db.salvar_config(self.config)
+                messagebox.showwarning(
+                    "Início automático",
+                    "Não foi possível alterar o início automático no logon "
+                    "do Windows. As demais configurações foram salvas.",
+                )
+        self._atualizar_status_inicio()
 
         # Aplica de imediato a saída de áudio escolhida.
         dispositivo = self.config.get("dispositivo_audio", "")
@@ -2309,6 +2425,25 @@ class FocoPomodoro:
         self.lbl_aviso_config.config(text="✓ Configurações salvas!")
         self.root.after(2500, lambda: self.lbl_aviso_config.config(text=""))
 
+    def _atualizar_status_inicio(self) -> None:
+        """Atualiza o rótulo que mostra se ESTA cópia está registrada no logon."""
+        if not hasattr(self, "lbl_inicio_status"):
+            return
+        if not inicio_windows.disponivel():
+            self.lbl_inicio_status.config(
+                text="Status no logon: indisponível (fora do Windows)",
+                fg=COR_TEXTO_FRACO,
+            )
+            return
+        if inicio_windows.esta_ativo():
+            self.lbl_inicio_status.config(
+                text="Status no logon: registrada ✓", fg=COR_INTERVALO,
+            )
+        else:
+            self.lbl_inicio_status.config(
+                text="Status no logon: não registrada", fg=COR_TEXTO_FRACO,
+            )
+
     def _reverter_config(self) -> None:
         """Restaura as variáveis da aba com os valores atualmente salvos."""
         self.var_pomodoro.set(self.config["pomodoro_min"])
@@ -2325,6 +2460,8 @@ class FocoPomodoro:
         self.var_aviso_central.set(self.config["aviso_central"])
         self.var_dias_historico.set(str(self.config["dias_historico"]))
         self.var_auto_iniciar.set(self.config["auto_iniciar"])
+        self.var_minimizar_bandeja.set(self.config["minimizar_para_bandeja"])
+        self.var_iniciar_windows.set(self.config["iniciar_com_windows"])
         self.var_prorrogacao_min.set(self.config["prorrogacao_min"])
         self.var_som_ambiente.set(self.config["som_ambiente"])
         self.var_meta.set(self.config["meta_pomodoros_dia"])
@@ -2614,9 +2751,9 @@ def main() -> None:
     root = tk.Tk()
     app = FocoPomodoro(root)
 
-    # Evita fechar a janela no meio de um pomodoro sem avisar (mesma lógica
-    # usada pelo item "Sair" do menu da bandeja).
-    root.protocol("WM_DELETE_WINDOW", app.encerrar)
+    # Botão X da janela: esconde na bandeja (se configurado) ou encerra,
+    # evitando fechar no meio de um pomodoro sem avisar.
+    root.protocol("WM_DELETE_WINDOW", app._ao_fechar_janela)
     root.mainloop()
 
 

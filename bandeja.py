@@ -33,12 +33,16 @@ _ARQUIVOS = {
     "ocioso": "foco_ocioso.ico",
 }
 
-# Texto (tooltip) mostrado ao passar o mouse sobre o ícone.
+# Primeira linha do texto (tooltip) mostrado ao passar o mouse sobre o ícone.
+# A segunda linha, opcional, é o tempo restante enviado pelo app a cada tique.
 _TOOLTIPS = {
     "foco": "Foco Pomodoro — focando 🍅",
     "intervalo": "Foco Pomodoro — intervalo ☕",
     "ocioso": "Foco Pomodoro — parado",
 }
+
+# O tooltip da bandeja do Windows (szTip) trunca em 128 caracteres.
+_LIMITE_TOOLTIP = 127
 
 
 def _garantir_libs() -> bool:
@@ -95,8 +99,18 @@ class Bandeja:
         self.icon = None
         self._imagens: dict[str, object] = {}
         self._estado = "ocioso"   # estado desejado atual
+        self._detalhe = ""        # 2ª linha do tooltip (ex.: "23:45 restantes")
+        self._titulo_aplicado = None  # último tooltip realmente enviado ao SO
         self.disponivel = False
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _montar_titulo(estado: str, detalhe: str) -> str:
+        """Monta o tooltip: estado na 1ª linha, tempo restante na 2ª."""
+        titulo = _TOOLTIPS[estado]
+        if detalhe:
+            titulo = f"{titulo}\n{detalhe}"
+        return titulo[:_LIMITE_TOOLTIP]
 
     # ------------------------------------------------------------------ #
     def iniciar(self) -> None:
@@ -117,12 +131,14 @@ class Bandeja:
             )
             with self._lock:
                 chave = self._estado
+                titulo = self._montar_titulo(chave, self._detalhe)
             self.icon = pystray.Icon(
                 "foco_pomodoro",
                 self._imagens[chave],
-                _TOOLTIPS[chave],
+                titulo,
                 menu,
             )
+            self._titulo_aplicado = titulo
             self.disponivel = True
             # run() bloqueia esta thread (daemon) até icon.stop().
             self.icon.run()
@@ -149,23 +165,33 @@ class Bandeja:
             self._imagens[chave] = Image.open(caminho).convert("RGBA")
 
     # ------------------------------------------------------------------ #
-    def atualizar(self, estado: str) -> None:
+    def atualizar(self, estado: str, detalhe: str = "") -> None:
         """Troca o ícone da bandeja para o estado indicado
-        ('foco', 'intervalo' ou 'ocioso'). Seguro chamar a qualquer momento,
-        mesmo antes de o ícone estar pronto."""
+        ('foco', 'intervalo' ou 'ocioso') e ajusta o tooltip.
+
+        `detalhe` vira a 2ª linha do tooltip — o app manda o tempo restante a
+        cada segundo, para que passar o mouse sobre o ícone mostre a contagem.
+        Seguro chamar a qualquer momento, mesmo antes de o ícone estar pronto."""
         if estado not in _ARQUIVOS:
             return
         with self._lock:
             self._estado = estado
+            self._detalhe = detalhe
+            titulo = self._montar_titulo(estado, detalhe)
         if not self.disponivel or self.icon is None:
             return  # ainda inicializando; será aplicado ao ficar pronto
         img = self._imagens.get(estado)
-        if img is not None:
-            try:
-                self.icon.icon = img
-                self.icon.title = _TOOLTIPS[estado]
-            except Exception:
-                pass
+        if img is None:
+            return
+        # Chamado a cada segundo: só fala com o SO quando algo mudou de fato.
+        if titulo == self._titulo_aplicado and self.icon.icon is img:
+            return
+        try:
+            self.icon.icon = img
+            self.icon.title = titulo
+            self._titulo_aplicado = titulo
+        except Exception:
+            pass
 
     def parar(self) -> None:
         """Remove o ícone da bandeja (ao fechar o app)."""

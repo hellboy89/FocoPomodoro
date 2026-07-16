@@ -1597,6 +1597,71 @@
       "data": "2026-07-15 20:14",
       "tarefa": "Currículo",
       "duracao_min": 15
+    },
+    {
+      "data": "2026-07-16 10:14",
+      "tarefa": "Estudos AZ-104",
+      "duracao_min": 23
+    },
+    {
+      "data": "2026-07-16 10:41",
+      "tarefa": "Estudos AZ-104",
+      "duracao_min": 23
+    },
+    {
+      "data": "2026-07-16 11:07",
+      "tarefa": "Estudos AZ-104",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-07-16 11:40",
+      "tarefa": "Estudos AZ-104",
+      "duracao_min": 23
+    },
+    {
+      "data": "2026-07-16 12:07",
+      "tarefa": "Estudos AZ-104",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-07-16 12:43",
+      "tarefa": "Estudos AZ-104",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-07-16 13:24",
+      "tarefa": "Estudos AZ-104",
+      "duracao_min": 23
+    },
+    {
+      "data": "2026-07-16 16:25",
+      "tarefa": "Estudos AZ-104",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-07-16 16:48",
+      "tarefa": "Estudos AZ-104",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-07-16 17:16",
+      "tarefa": "Estudos AZ-104",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-07-16 17:39",
+      "tarefa": "Estudos AZ-104",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-07-16 18:03",
+      "tarefa": "Currículo",
+      "duracao_min": 20
+    },
+    {
+      "data": "2026-07-16 18:49",
+      "tarefa": "Currículo",
+      "duracao_min": 23
     }
   ]
 }

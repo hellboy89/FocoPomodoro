@@ -37,6 +37,10 @@ CONFIG_PADRAO = {
     "aviso_central": True,
     # Inicia o próximo ciclo automaticamente ao terminar o atual.
     "auto_iniciar": True,
+    # Ao fechar (X) a janela, esconde o app na bandeja em vez de sair.
+    "minimizar_para_bandeja": False,
+    # Registra o app para iniciar automaticamente no logon do Windows.
+    "iniciar_com_windows": False,
     # Minutos extras do botão "prorrogar foco" do aviso de fim de pomodoro.
     "prorrogacao_min": 5,
     # Som contínuo durante o foco ("Nenhum" desliga).
