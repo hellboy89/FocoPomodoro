@@ -1,0 +1,14 @@
+# Dependências opcionais do Foco Pomodoro.
+#
+# O app funciona sem elas (a interface, o timer, o histórico e os sons usam
+# apenas a biblioteca padrão). Estas bibliotecas são necessárias apenas para o
+# ícone na bandeja do sistema que muda conforme o estado — e, se faltarem, o
+# próprio app tenta instalá-las automaticamente na primeira execução.
+pystray
+Pillow
+
+# Necessária apenas para fixar a saída de áudio num dispositivo específico
+# (Configurações › Dispositivo de saída). Sem ela, o som usa o dispositivo
+# padrão do Windows. Também é instalada automaticamente quando você escolhe um
+# dispositivo. Não requer numpy.
+sounddevice

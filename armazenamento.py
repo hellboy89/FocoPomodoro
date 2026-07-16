@@ -41,6 +41,9 @@ CONFIG_PADRAO = {
     "prorrogacao_min": 5,
     # Som contínuo durante o foco ("Nenhum" desliga).
     "som_ambiente": "Nenhum",
+    # Dispositivo de saída fixo para TODO o som do app, pelo nome que aparece
+    # no painel de Som do Windows › Reprodução ("" = segue o padrão do Windows).
+    "dispositivo_audio": "",
     # Meta de pomodoros por dia (0 = sem meta).
     "meta_pomodoros_dia": 0,
     # Por quantos dias manter o histórico. Registros mais antigos que isso
@@ -163,6 +166,46 @@ def registrar_pomodoro(
     if dias_manter and dias_manter > 0:
         podar_historico(dias_manter)
     return registro
+
+
+def estender_ultimo_pomodoro(
+    minutos_extra: int, tarefa: str | None = None,
+) -> dict | None:
+    """Soma minutos ao pomodoro COMPLETO mais recente e regrava o arquivo.
+
+    Usado na prorrogação do foco (+X min): o tempo extra faz parte do mesmo
+    pomodoro que foi estendido, então é somado à sua duração em vez de virar
+    um registro parcial separado (que apareceria como um foco quebrado).
+
+    Se `tarefa` for informada, procura o completo mais recente dessa tarefa;
+    não achando (ou se None), usa o completo mais recente de qualquer tarefa.
+    Devolve o registro atualizado, ou None se não houver pomodoro completo
+    (nem minutos válidos a somar)."""
+    try:
+        minutos_extra = int(minutos_extra)
+    except (TypeError, ValueError):
+        return None
+    if minutos_extra <= 0:
+        return None
+
+    historico = carregar_historico()
+    alvo = None
+    if tarefa is not None:
+        for reg in reversed(historico):
+            if not reg.get("parcial") and reg.get("tarefa") == tarefa:
+                alvo = reg
+                break
+    if alvo is None:
+        for reg in reversed(historico):
+            if not reg.get("parcial"):
+                alvo = reg
+                break
+    if alvo is None:
+        return None
+
+    alvo["duracao_min"] = int(alvo.get("duracao_min", 0)) + minutos_extra
+    _gravar_json(ARQUIVO_HISTORICO, {"pomodoros": historico})
+    return alvo
 
 
 def adicionar_registro(

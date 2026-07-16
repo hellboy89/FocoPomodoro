@@ -20,8 +20,15 @@ import zlib
 
 PASTA = os.path.dirname(os.path.abspath(__file__))
 ICONE = os.path.join(PASTA, "foco.ico")
+# Variantes usadas na barra de tarefas conforme o estado do timer.
+ICONE_INTERVALO = os.path.join(PASTA, "foco_intervalo.ico")
+ICONE_OCIOSO = os.path.join(PASTA, "foco_ocioso.ico")
 ATALHO = os.path.join(PASTA, "_FocoPomodo_INICIAR.lnk")
 SCRIPT = os.path.join(PASTA, "foco_pomodoro.py")
+
+# Cores dos corpos do tomate (RGB), casando com o tema do app.
+COR_TOMATE_FOCO = (255, 107, 107)      # vermelho-tomate (foco)
+COR_TOMATE_INTERVALO = (78, 201, 166)  # verde-menta (intervalo)
 
 S = 256  # tamanho do ícone (256x256)
 
@@ -71,8 +78,9 @@ def _cob_retangulo_arredondado(x, y, cx, cy, halfw, halfh, r):
 # --------------------------------------------------------------------------- #
 # Desenho do tomate
 # --------------------------------------------------------------------------- #
-def _desenhar() -> bytearray:
+def _desenhar(cor_corpo=COR_TOMATE_FOCO) -> bytearray:
     buf = bytearray(S * S * 4)  # RGBA, começa transparente
+    cr, cg, cb = cor_corpo
 
     # Centro do tomate e do brilho.
     cx, cy, rx, ry = 128, 152, 92, 84
@@ -112,9 +120,9 @@ def _desenhar() -> bytearray:
                 luz = _clamp(1 - dist_luz / 130) * 0.55
                 sombra = _clamp((y - cy) / ry) * 0.28
                 fator = 1 + luz - sombra
-                r = int(_clamp(255 * fator, 0, 255))
-                g = int(_clamp(107 * fator, 0, 255))
-                b = int(_clamp(107 * fator, 0, 255))
+                r = int(_clamp(cr * fator, 0, 255))
+                g = int(_clamp(cg * fator, 0, 255))
+                b = int(_clamp(cb * fator, 0, 255))
                 _over(buf, i, r, g, b, cob_t)
 
             # 4) Caule curto no topo.
@@ -122,6 +130,19 @@ def _desenhar() -> bytearray:
             if cob_caule > 0:
                 _over(buf, i, 64, 150, 120, cob_caule)
 
+    return buf
+
+
+def _acinzentar(buf: bytearray) -> bytearray:
+    """Converte o desenho para tons de cinza esmaecidos (estado ocioso)."""
+    for i in range(0, len(buf), 4):
+        a = buf[i + 3]
+        if a == 0:
+            continue
+        # Luminância perceptual, puxada para um cinza claro e discreto.
+        lum = int(0.299 * buf[i] + 0.587 * buf[i + 1] + 0.114 * buf[i + 2])
+        cinza = int(_clamp(90 + lum * 0.45, 0, 255))
+        buf[i] = buf[i + 1] = buf[i + 2] = cinza
     return buf
 
 
@@ -145,8 +166,8 @@ def _png_bytes(w: int, h: int, rgba: bytearray) -> bytes:
     return assinatura + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
 
 
-def gerar_icone() -> None:
-    png = _png_bytes(S, S, _desenhar())
+def _gravar_ico(caminho: str, buf: bytearray) -> None:
+    png = _png_bytes(S, S, buf)
     cabecalho = struct.pack("<HHH", 0, 1, 1)  # reservado, tipo=ícone, 1 imagem
     entrada = struct.pack(
         "<BBBBHHII",
@@ -155,9 +176,19 @@ def gerar_icone() -> None:
         1, 32,       # planos, bits por pixel
         len(png), 6 + 16,  # tamanho e offset dos dados
     )
-    with open(ICONE, "wb") as f:
+    with open(caminho, "wb") as f:
         f.write(cabecalho + entrada + png)
+
+
+def gerar_icone() -> None:
+    """Gera o ícone padrão (tomate vermelho) e as variantes de estado
+    usadas na barra de tarefas: intervalo (verde) e ocioso (cinza)."""
+    _gravar_ico(ICONE, _desenhar(COR_TOMATE_FOCO))
     print(f"Ícone gerado: {ICONE}")
+    _gravar_ico(ICONE_INTERVALO, _desenhar(COR_TOMATE_INTERVALO))
+    print(f"Ícone gerado: {ICONE_INTERVALO}")
+    _gravar_ico(ICONE_OCIOSO, _acinzentar(_desenhar(COR_TOMATE_FOCO)))
+    print(f"Ícone gerado: {ICONE_OCIOSO}")
 
 
 # --------------------------------------------------------------------------- #

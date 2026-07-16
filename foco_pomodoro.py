@@ -14,9 +14,11 @@ Recursos:
   * Foco interrompido no meio é aproveitado como registro parcial (◐).
   * Aba Estatísticas: gráfico dos últimos 14 dias, sequência de dias
     (streak), meta diária de pomodoros e média por dia.
+  * Aba Jardim: cada pomodoro concluído "planta" uma muda no canteiro do
+    dia; as plantas amadurecem conforme a sequência (broto → flor → árvore)
+    e a floresta resume os últimos 7 dias. Tudo derivado do histórico.
   * Prorrogação do foco ao fim de um pomodoro (minutos configuráveis).
   * Som ambiente opcional durante o foco (tique-taque ou chuva).
-  * Atalhos: Espaço inicia/pausa, R reinicia, S pula.
   * Botão para limpar os dados quando quiser.
 
 Interface feita com tkinter (já incluído no Python). Tema escuro com um
@@ -27,12 +29,15 @@ from __future__ import annotations
 
 import csv
 import math
+import os
 import sys
+import threading
 from datetime import date, datetime, timedelta
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 import armazenamento as db
+import bandeja
 import notificacao
 import sons
 
@@ -54,6 +59,18 @@ COR_SCROLL = "#565c78"         # cursor da barra (claro, contrasta com a trilha)
 COR_SCROLL_ATIVO = "#727a9c"   # cursor ao passar/arrastar (mais claro)
 COR_DESTAQUE = "#f5a97f"       # âmbar: streak, meta e barra de hoje no gráfico
 
+# Linhas alternadas (efeito "zebra") do combobox "No que você vai focar?":
+# monocromático, alternando dois tons da MESMA cor — uma linha mais escura,
+# a seguinte mais clara, e assim por diante. Fica elegante e fácil de
+# percorrer sem poluir com cores diferentes. Ambos legíveis com texto claro.
+COR_ITEM_ESCURO = "#363b57"    # tom mais escuro (indigo)
+COR_ITEM_CLARO = "#484e73"     # tom mais claro (mesmo indigo)
+COR_ITEM_TEXTO = "#f7f8fc"     # texto (claro) sobre as linhas
+
+# Aba Jardim: terra dos canteiros onde as "plantas" (emojis) são fincadas.
+COR_TERRA = "#7a5230"          # marrom da leira de terra
+COR_TERRA_VAZIA = "#454a63"    # cova ainda sem planta (tom apagado)
+
 FONTE = "Segoe UI"
 
 
@@ -64,15 +81,46 @@ def _clarear(cor: str, fator: float = 0.16) -> str:
         min(255, int(c + (255 - c) * fator)) for c in (r, g, b)
     )
 
+
+def _tingir(cor: str, fundo: str = COR_FUNDO, fator: float = 0.80) -> str:
+    """Mistura uma cor viva com o fundo escuro, gerando um tom suave.
+
+    Usado para dar aos botões um fundo levemente colorido (tingido) sem
+    ofuscar a cor cheia do botão principal.
+    """
+    r, g, b = (int(cor[i:i + 2], 16) for i in (1, 3, 5))
+    fr, fg, fb = (int(fundo[i:i + 2], 16) for i in (1, 3, 5))
+    return "#%02x%02x%02x" % (
+        int(r + (fr - r) * fator),
+        int(g + (fg - g) * fator),
+        int(b + (fb - b) * fator),
+    )
+
 # Estados possíveis do ciclo.
 FOCO = "foco"
 INTERVALO_CURTO = "intervalo_curto"
 INTERVALO_LONGO = "intervalo_longo"
 
+# Ícones da barra de tarefas conforme o estado (resolvidos ao lado deste
+# arquivo, para funcionar mesmo quando o app é aberto de outra pasta).
+_PASTA = os.path.dirname(os.path.abspath(__file__))
+ICONE_FOCO = os.path.join(_PASTA, "foco.ico")            # focando (vermelho)
+ICONE_INTERVALO = os.path.join(_PASTA, "foco_intervalo.ico")  # intervalo (verde)
+ICONE_OCIOSO = os.path.join(_PASTA, "foco_ocioso.ico")   # parado/pausado (cinza)
+
 
 class FocoPomodoro:
     FILTRO_TODOS = "Todos os dias"
     FILTRO_TODAS_TAREFAS = "Todas as tarefas"
+    ROTULO_DISP_PADRAO = "🔊 Padrão do Windows (segue o Windows)"
+
+    # Aba Jardim -------------------------------------------------------- #
+    # Flores usadas no nível "flor" do canteiro; a variedade é escolhida
+    # pelo índice da planta, deixando o canteiro colorido e não repetitivo.
+    PALETA_FLORES = ("🌷", "🌻", "🌸", "🌼", "🌹", "🌺")
+    # Abreviações dos dias da semana (segunda=0 ... domingo=6), para rotular
+    # as colunas da "floresta" dos últimos 7 dias.
+    DIAS_SEMANA = ("seg", "ter", "qua", "qui", "sex", "sáb", "dom")
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -80,6 +128,13 @@ class FocoPomodoro:
 
         # Ao abrir, já descarta registros de histórico além do limite salvo.
         db.podar_historico(self.config["dias_historico"])
+
+        # Fixa a saída de áudio no dispositivo salvo (se houver). Vazio = segue
+        # o dispositivo padrão do Windows, via winsound.
+        dispositivo = self.config.get("dispositivo_audio", "")
+        sons.definir_dispositivo(dispositivo or None)
+        if dispositivo:
+            sons.garantir_async()  # prepara o backend sem travar a abertura
 
         # Estado do timer ------------------------------------------------- #
         self.estado = FOCO
@@ -90,9 +145,13 @@ class FocoPomodoro:
         self._job = None  # id do agendamento .after()
         self._prorrogacao = False  # True enquanto corre um "+5 min" extra
 
+        self._icone_atual = None  # evita reaplicar o mesmo ícone à toa
+        self.bandeja = bandeja.Bandeja(self)  # ícone na área de notificação
         self._montar_janela()
         self._montar_interface()
         self._atualizar_visor()
+        self.bandeja.iniciar()
+        self._atualizar_icone_bandeja()
         self._atualizar_aba_historico()
 
     # ===================================================================== #
@@ -103,7 +162,9 @@ class FocoPomodoro:
         self.root.configure(bg=COR_FUNDO)
 
         # Tamanho fixo, centralizado na tela e sem permitir maximizar.
-        largura, altura = 460, 660
+        # 500px de largura acomodam as 5 abas sem cortar e dão folga aos
+        # cartões de estatísticas/jardim (valores longos como "227 min").
+        largura, altura = 500, 660
         tela_l = self.root.winfo_screenwidth()
         tela_a = self.root.winfo_screenheight()
         x = (tela_l - largura) // 2
@@ -122,7 +183,7 @@ class FocoPomodoro:
             "TNotebook.Tab",
             background=COR_PAINEL,
             foreground=COR_TEXTO_FRACO,
-            padding=(18, 8),
+            padding=(11, 8),  # horizontal enxuto p/ as 5 abas caberem inteiras
             font=(FONTE, 10, "bold"),
             borderwidth=0,
         )
@@ -152,6 +213,105 @@ class FocoPomodoro:
                 ],
             )
 
+        # Combobox "No que você vai focar?": estilo próprio, mais encorpado e
+        # colorido que o padrão. Campo em tom de painel, seta destacada em
+        # tomate e borda que acende em âmbar ao receber foco. A altura vem da
+        # fonte maior (definida no widget) somada ao padding daqui.
+        estilo.configure(
+            "Foco.TCombobox",
+            fieldbackground=COR_PAINEL,
+            background=COR_FOCO,        # área da seta
+            foreground=COR_TEXTO,
+            arrowcolor="#ffffff",
+            arrowsize=18,
+            bordercolor=COR_FOCO,
+            lightcolor=COR_PAINEL,
+            darkcolor=COR_PAINEL,
+            relief="flat",
+            padding=(8, 3),
+        )
+        estilo.map(
+            "Foco.TCombobox",
+            fieldbackground=[
+                ("readonly", COR_PAINEL),
+                ("disabled", COR_FUNDO),
+            ],
+            foreground=[("disabled", COR_TEXTO_FRACO)],
+            background=[
+                ("disabled", COR_BOTAO),
+                ("active", "#ff8585"),
+                ("pressed", "#ff8585"),
+            ],
+            arrowcolor=[("disabled", COR_TEXTO_FRACO)],
+            bordercolor=[
+                ("focus", COR_DESTAQUE),
+                ("hover", COR_DESTAQUE),
+            ],
+        )
+
+    def _atualizar_icone_bandeja(self) -> None:
+        """Reflete o estado atual do timer em dois lugares, para sinalizar que
+        o timer está em atividade e qual contagem corre:
+
+          * o ícone na bandeja do sistema (área de notificação);
+          * o ícone da janela/barra de tarefas (reforço visual).
+
+        Estados:
+          * focando        -> tomate vermelho (foco.ico)
+          * intervalo      -> tomate verde    (foco_intervalo.ico)
+          * parado/pausado -> tomate cinza    (foco_ocioso.ico)
+        """
+        if not self.rodando:
+            estado, caminho = "ocioso", ICONE_OCIOSO
+        elif self.estado == FOCO:
+            estado, caminho = "foco", ICONE_FOCO
+        else:
+            estado, caminho = "intervalo", ICONE_INTERVALO
+
+        # Ícone na bandeja do sistema (roda em thread própria; sempre seguro).
+        self.bandeja.atualizar(estado)
+
+        # Ícone da janela/barra de tarefas.
+        if caminho == self._icone_atual:
+            return  # já é o ícone certo; nada a fazer
+        try:
+            self.root.iconbitmap(caminho)
+            self._icone_atual = caminho
+        except tk.TclError:
+            # Arquivo ausente/ inválido: mantém o ícone anterior sem quebrar.
+            pass
+
+    def _restaurar_da_bandeja(self) -> None:
+        """Traz a janela de volta à frente (item 'Abrir' do menu da bandeja)."""
+        try:
+            self.root.deiconify()
+            self.root.state("normal")
+            self.root.lift()
+            self.root.attributes("-topmost", True)
+            self.root.after(150, lambda: self.root.attributes("-topmost", False))
+            self.root.focus_force()
+        except tk.TclError:
+            pass
+
+    def encerrar(self) -> None:
+        """Fecha o app com as mesmas checagens do botão de fechar da janela
+        (avisa sobre config não salva e sobre timer em andamento)."""
+        # Avisa se há configurações alteradas e ainda não salvas.
+        if not self._tratar_config_pendente():
+            return
+        if self.rodando and not messagebox.askyesno(
+            "Sair", "O timer está rodando. Deseja realmente sair?"
+        ):
+            return
+        # Aproveita o tempo de um foco interrompido pelo fechamento.
+        self._registrar_foco_parcial()
+        self.bandeja.parar()
+        self.root.destroy()
+
+    def _sair_pela_bandeja(self) -> None:
+        """Item 'Sair' do menu da bandeja (já devolvido à thread do tkinter)."""
+        self.encerrar()
+
     def _montar_interface(self) -> None:
         self.abas = ttk.Notebook(self.root)
         self.abas.pack(fill="both", expand=True, padx=10, pady=10)
@@ -159,43 +319,27 @@ class FocoPomodoro:
         self.aba_timer = tk.Frame(self.abas, bg=COR_FUNDO)
         self.aba_historico = tk.Frame(self.abas, bg=COR_FUNDO)
         self.aba_stats = tk.Frame(self.abas, bg=COR_FUNDO)
+        self.aba_jardim = tk.Frame(self.abas, bg=COR_FUNDO)
         self.aba_config = tk.Frame(self.abas, bg=COR_FUNDO)
 
         self.abas.add(self.aba_timer, text="Timer")
         self.abas.add(self.aba_historico, text="Histórico")
         self.abas.add(self.aba_stats, text="Estatísticas")
+        self.abas.add(self.aba_jardim, text="Jardim")
         self.abas.add(self.aba_config, text="Configurações")
 
         self._montar_aba_timer()
         self._montar_aba_historico()
         self._montar_aba_estatisticas()
+        self._montar_aba_jardim()
         self._montar_aba_config()
 
         # Aviso de configurações não salvas ao sair da aba Configurações.
         self._idx_config = self.abas.index(self.aba_config)
         self._idx_stats = self.abas.index(self.aba_stats)
+        self._idx_jardim = self.abas.index(self.aba_jardim)
         self._aba_atual = self.abas.index(self.abas.select())
         self.abas.bind("<<NotebookTabChanged>>", self._ao_trocar_aba, add="+")
-
-        # Atalhos de teclado (só agem na aba Timer, fora de campos de texto).
-        atalhos = {
-            "<space>": self.alternar_play_pause,
-            "<r>": self.reiniciar_ciclo, "<R>": self.reiniciar_ciclo,
-            "<s>": self.pular_ciclo, "<S>": self.pular_ciclo,
-        }
-        for tecla, acao in atalhos.items():
-            self.root.bind(tecla, lambda e, a=acao: self._atalho_teclado(a))
-
-    def _atalho_teclado(self, acao) -> str | None:
-        """Dispara a ação do atalho, ignorando quando o usuário está
-        digitando num campo ou fora da aba Timer."""
-        foco = self.root.focus_get()
-        if isinstance(foco, (tk.Entry, tk.Spinbox, tk.Listbox, ttk.Combobox, tk.Button)):
-            return None
-        if self._aba_atual != self.abas.index(self.aba_timer):
-            return None
-        acao()
-        return "break"
 
     # --------------------------- Aba Timer ------------------------------ #
     def _montar_aba_timer(self) -> None:
@@ -254,18 +398,22 @@ class FocoPomodoro:
         bloco = tk.Frame(f, bg=COR_FUNDO)
         bloco.pack(fill="x", padx=30, pady=(10, 6))
         tk.Label(
-            bloco, text="No que você vai focar?",
-            font=(FONTE, 10), fg=COR_TEXTO_FRACO, bg=COR_FUNDO,
+            bloco, text="🎯  No que você vai focar?",
+            font=(FONTE, 12, "bold"), fg=COR_DESTAQUE, bg=COR_FUNDO,
         ).pack(anchor="w")
         # Combobox: itens vêm da lista salva em config.json e são gerenciados
         # na aba Configurações. "readonly" = só seleciona, não digita.
+        # O visual (campo + lista colorida) vem do estilo "Foco.TCombobox" e
+        # de _estilizar_dropdown_tarefa, chamado via postcommand ao abrir.
         self.var_tarefa = tk.StringVar()
         self.combo_tarefa = ttk.Combobox(
             bloco, textvariable=self.var_tarefa,
             values=self.config.get("tarefas", []),
-            state="readonly", font=(FONTE, 12),
+            state="readonly", font=(FONTE, 12, "bold"),
+            style="Foco.TCombobox", justify="center",
+            postcommand=self._estilizar_dropdown_tarefa,
         )
-        self.combo_tarefa.pack(fill="x", ipady=6, pady=(4, 0))
+        self.combo_tarefa.pack(fill="x", ipady=2, pady=(6, 0))
         # Restaura a última tarefa usada; se não existir mais, usa a primeira.
         tarefas = self.config.get("tarefas", [])
         ultima = self.config.get("tarefa_selecionada", "")
@@ -290,16 +438,13 @@ class FocoPomodoro:
 
         self._criar_botao(
             botoes, "⟳ Reiniciar", self.reiniciar_ciclo,
+            tint=COR_DESTAQUE,
         ).grid(row=0, column=1, padx=5)
 
         self._criar_botao(
             botoes, "⏭ Pular", self.pular_ciclo,
+            tint=COR_INTERVALO,
         ).grid(row=0, column=2, padx=5)
-
-        tk.Label(
-            f, text="Espaço inicia/pausa   ·   R reinicia   ·   S pula",
-            font=(FONTE, 8), fg=COR_TEXTO_FRACO, bg=COR_FUNDO,
-        ).pack()
 
         self.lbl_sessao = tk.Label(
             f, text="Pomodoros nesta sessão: 0",
@@ -315,19 +460,33 @@ class FocoPomodoro:
         self.lbl_meta.pack(pady=(2, 10))
         self._atualizar_rotulo_meta()
 
-    def _criar_botao(self, pai, texto, comando, cor=None, principal=False,
-                     padx=16, pady=10):
+    def _criar_botao(self, pai, texto, comando, cor=None, tint=None,
+                     principal=False, padx=16, pady=10):
+        # Três estilos:
+        #  - principal: fundo cheio na cor (destaque máximo, ex.: Iniciar);
+        #  - tint: fundo suave tingido + texto na cor viva (ex.: Reiniciar/Pular);
+        #  - padrão: cinza neutro (demais botões do app).
+        if principal:
+            base = cor or COR_FOCO
+            fg = fg_ativo = COR_FUNDO
+            negrito = "bold"
+        elif tint:
+            base = _tingir(tint)
+            fg = fg_ativo = tint
+            negrito = "bold"
+        else:
+            base = cor or COR_BOTAO
+            fg = fg_ativo = COR_TEXTO
+            negrito = "normal"
         botao = tk.Button(
             pai, text=texto, command=comando,
-            font=(FONTE, 11, "bold" if principal else "normal"),
-            fg=COR_FUNDO if principal else COR_TEXTO,
-            bg=cor or COR_BOTAO,
-            activebackground=cor or COR_BOTAO_ATIVO,
-            activeforeground=COR_FUNDO if principal else COR_TEXTO,
+            font=(FONTE, 11, negrito),
+            fg=fg, bg=base,
+            activebackground=_clarear(base),
+            activeforeground=fg_ativo,
             relief="flat", bd=0, padx=padx, pady=pady, cursor="hand2",
         )
         # Hover: clareia o fundo enquanto o mouse está sobre o botão.
-        base = cor or COR_BOTAO
         hover = _clarear(base)
         botao.bind("<Enter>", lambda e: botao.config(bg=hover))
         botao.bind("<Leave>", lambda e: botao.config(bg=base))
@@ -487,12 +646,39 @@ class FocoPomodoro:
             fg=COR_TEXTO_FRACO, bg=COR_PAINEL,
         ).pack(anchor="w", padx=14, pady=(10, 0))
         lbl_valor = tk.Label(
-            cartao, text=valor, font=(FONTE, 20, "bold"),
+            cartao, text=valor, font=(FONTE, 18, "bold"),
             fg=cor, bg=COR_PAINEL,
         )
         lbl_valor.pack(anchor="w", padx=14, pady=(0, 12))
         cartao.lbl_valor = lbl_valor  # guarda referência para atualizar
+        cartao.fonte_base = 18        # tamanho ideal; encolhe se não couber
+        # Reencaixa o valor sempre que o cartão muda de largura (ex.: ao abrir
+        # a aba pela 1ª vez, quando a largura real passa a ser conhecida).
+        cartao.bind(
+            "<Configure>", lambda e, c=cartao: self._ajustar_valor_cartao(c),
+        )
         return cartao
+
+    def _ajustar_valor_cartao(self, cartao) -> None:
+        """Encolhe a fonte do valor do cartão até caber na largura disponível,
+        para números grandes (ex.: '365 dias', '1234 min') nunca ficarem
+        cortados. Não passa da fonte-base nem encolhe abaixo de 11."""
+        lbl = cartao.lbl_valor
+        disp = cartao.winfo_width() - 2 * 14  # desconta o padx do rótulo
+        if disp <= 1:
+            return  # ainda sem layout; o <Configure> chama de novo com a largura real
+        texto = lbl.cget("text")
+        tam = getattr(cartao, "fonte_base", 18)
+        medidor = tkfont.Font(family=FONTE, size=tam, weight="bold")
+        while tam > 11 and medidor.measure(texto) > disp:
+            tam -= 1
+            medidor.configure(size=tam)
+        lbl.config(font=(FONTE, tam, "bold"))
+
+    def _definir_valor_cartao(self, cartao, texto: str) -> None:
+        """Atualiza o valor de um cartão e reencaixa a fonte automaticamente."""
+        cartao.lbl_valor.config(text=texto)
+        self._ajustar_valor_cartao(cartao)
 
     # ------------------------ Aba Estatísticas -------------------------- #
     DIAS_GRAFICO = 14
@@ -546,18 +732,18 @@ class FocoPomodoro:
         dados = db.minutos_por_dia(self.DIAS_GRAFICO)
 
         streak = db.calcular_streak()
-        self.cartao_streak.lbl_valor.config(
-            text=f"{streak} dia" + ("" if streak == 1 else "s"),
+        self._definir_valor_cartao(
+            self.cartao_streak, f"{streak} dia" + ("" if streak == 1 else "s"),
         )
 
         meta = int(self.config.get("meta_pomodoros_dia", 0) or 0)
         feitos = db.pomodoros_do_dia()
-        self.cartao_hoje.lbl_valor.config(
-            text=f"{feitos} / {meta}" if meta > 0 else str(feitos),
+        self._definir_valor_cartao(
+            self.cartao_hoje, f"{feitos} / {meta}" if meta > 0 else str(feitos),
         )
 
         media = sum(dados.values()) / max(1, len(dados))
-        self.cartao_media.lbl_valor.config(text=f"{round(media)} min")
+        self._definir_valor_cartao(self.cartao_media, f"{round(media)} min")
 
         self._desenhar_grafico(dados)
 
@@ -634,6 +820,329 @@ class FocoPomodoro:
         icone = "🏆" if feitos >= meta else "🍅"
         self.lbl_meta.config(text=f"Meta de hoje: {icone} {feitos} / {meta}")
 
+    # --------------------------- Aba Jardim ----------------------------- #
+    #
+    # Um jardim que cresce sozinho a partir do histórico: cada pomodoro
+    # concluído "planta" uma muda no canteiro de hoje e a floresta mostra os
+    # últimos 7 dias. Nada é gravado a mais — tudo é derivado do que já existe
+    # em historico.json (mesmos números da aba Estatísticas). As "plantas" são
+    # emojis desenhados sobre leiras de terra (retângulos/óvalos simples), sem
+    # depender de imagens nem de internet.
+
+    NIVEIS_JARDIM = ("Brotos 🌱", "Ervas 🌿", "Flores 🌷", "Árvores 🌳")
+
+    def _nivel_jardim(self, streak: int) -> int:
+        """Nível de maturação do jardim conforme a sequência de dias (streak):
+        0=broto, 1=erva, 2=flor, 3=árvore. Quanto mais firme o hábito, mais
+        maduras nascem as plantas do dia."""
+        if streak <= 1:
+            return 0
+        if streak <= 3:
+            return 1
+        if streak <= 6:
+            return 2
+        return 3
+
+    def _planta_hoje(self, indice: int, nivel: int) -> str:
+        """Emoji de uma planta do canteiro de hoje, dado seu índice e o nível
+        atual do jardim. No nível 'flor', varia a espécie pelo índice para o
+        canteiro ficar colorido e variado."""
+        if nivel == 0:
+            return "🌱"
+        if nivel == 1:
+            return "🌿"
+        if nivel == 2:
+            return self.PALETA_FLORES[indice % len(self.PALETA_FLORES)]
+        return "🌳"
+
+    def _planta_por_pomodoros(self, pomodoros: int) -> str:
+        """Planta que representa um dia inteiro na floresta: quanto mais
+        pomodoros naquele dia, mais madura a planta (vazio = terra nua)."""
+        if pomodoros <= 0:
+            return ""
+        if pomodoros == 1:
+            return "🌱"
+        if pomodoros == 2:
+            return "🌿"
+        if pomodoros <= 4:
+            return "🌷"
+        if pomodoros <= 6:
+            return "🌻"
+        return "🌳"
+
+    def _montar_aba_jardim(self) -> None:
+        wrap = self._frame_rolavel(self.aba_jardim)
+
+        # Cartões-resumo (mesmo estilo das outras abas).
+        cartoes = tk.Frame(wrap, bg=COR_FUNDO)
+        cartoes.pack(fill="x", padx=14, pady=(16, 8))
+        self.cartao_jardim_hoje = self._criar_cartao(
+            cartoes, "🌱 Plantas hoje", "0", cor=COR_INTERVALO,
+        )
+        self.cartao_jardim_hoje.grid(row=0, column=0, padx=6, sticky="nsew")
+        self.cartao_jardim_streak = self._criar_cartao(
+            cartoes, "🔥 Sequência", "0 dias", cor=COR_DESTAQUE,
+        )
+        self.cartao_jardim_streak.grid(row=0, column=1, padx=6, sticky="nsew")
+        self.cartao_jardim_total = self._criar_cartao(
+            cartoes, "🌳 Colheita total", "0", cor=COR_FOCO,
+        )
+        self.cartao_jardim_total.grid(row=0, column=2, padx=6, sticky="nsew")
+        for c in range(3):
+            cartoes.columnconfigure(c, weight=1, uniform="jardim")
+
+        # Frase de estado (muda conforme meta batida / canteiro vazio).
+        self.lbl_jardim_status = tk.Label(
+            wrap, text="", font=(FONTE, 11, "bold"),
+            fg=COR_INTERVALO, bg=COR_FUNDO, justify="left", wraplength=330,
+        )
+        self.lbl_jardim_status.pack(anchor="w", padx=20, pady=(10, 2))
+
+        # Canteiro de hoje: uma muda por pomodoro concluído hoje.
+        # Os canvases usam fill="x" e se redesenham conforme a largura real da
+        # aba (via <Configure>), então nada é cortado, seja qual for o espaço.
+        tk.Label(
+            wrap, text="🌻 Canteiro de hoje", font=(FONTE, 12, "bold"),
+            fg=COR_TEXTO, bg=COR_FUNDO,
+        ).pack(anchor="w", padx=20, pady=(8, 4))
+        moldura_c = tk.Frame(wrap, bg=COR_PAINEL)
+        moldura_c.pack(fill="x", padx=14)
+        self.canvas_canteiro = tk.Canvas(
+            moldura_c, height=90, bg=COR_PAINEL, highlightthickness=0,
+        )
+        self.canvas_canteiro.pack(fill="x", padx=6, pady=6)
+        self.canvas_canteiro.bind("<Configure>", self._ao_redimensionar_canteiro)
+
+        # Floresta: um resumo dos últimos 7 dias, uma planta por dia.
+        tk.Label(
+            wrap, text="🌳 Sua floresta — últimos 7 dias", font=(FONTE, 12, "bold"),
+            fg=COR_TEXTO, bg=COR_FUNDO,
+        ).pack(anchor="w", padx=20, pady=(14, 4))
+        moldura_f = tk.Frame(wrap, bg=COR_PAINEL)
+        moldura_f.pack(fill="x", padx=14)
+        self.canvas_floresta = tk.Canvas(
+            moldura_f, height=110, bg=COR_PAINEL, highlightthickness=0,
+        )
+        self.canvas_floresta.pack(fill="x", padx=6, pady=6)
+        self.canvas_floresta.bind("<Configure>", self._ao_redimensionar_floresta)
+
+        tk.Label(
+            wrap,
+            text=("Cada pomodoro concluído planta uma muda no canteiro de hoje. "
+                  "Quanto maior sua sequência (🔥), mais as plantas amadurecem: "
+                  "🌱 broto → 🌿 erva → 🌷 flor → 🌳 árvore. Focos interrompidos "
+                  "viram 🥀 e bater a meta do dia faz o canteiro florescer ☀️."),
+            font=(FONTE, 9), fg=COR_TEXTO_FRACO, bg=COR_FUNDO,
+            justify="left", wraplength=330,
+        ).pack(anchor="w", padx=20, pady=(10, 16))
+
+        self._atualizar_aba_jardim()
+
+    def _atualizar_aba_jardim(self) -> None:
+        """Recalcula cartões, frase de estado e redesenha os dois canteiros a
+        partir do histórico atual. Seguro chamar a qualquer momento (ignora
+        silenciosamente se a aba ainda não foi montada)."""
+        if not hasattr(self, "canvas_canteiro"):
+            return
+
+        historico = db.carregar_historico()
+        hoje = date.today()
+        hoje_iso = hoje.isoformat()
+
+        completos_hoje = sum(
+            1 for r in historico
+            if str(r.get("data", ""))[:10] == hoje_iso and not r.get("parcial")
+        )
+        parciais_hoje = sum(
+            1 for r in historico
+            if str(r.get("data", ""))[:10] == hoje_iso and r.get("parcial")
+        )
+        total = sum(1 for r in historico if not r.get("parcial"))
+        streak = db.calcular_streak()
+        meta = int(self.config.get("meta_pomodoros_dia", 0) or 0)
+
+        # Cartões.
+        self._definir_valor_cartao(self.cartao_jardim_hoje, str(completos_hoje))
+        self._definir_valor_cartao(
+            self.cartao_jardim_streak, f"{streak} dia" + ("" if streak == 1 else "s"),
+        )
+        self._definir_valor_cartao(self.cartao_jardim_total, str(total))
+
+        # Frase de estado / colheita.
+        nivel = self._nivel_jardim(streak)
+        nome_nivel = self.NIVEIS_JARDIM[nivel]
+        if meta > 0 and completos_hoje >= meta:
+            self.lbl_jardim_status.config(
+                text=f"☀️ Canteiro florido! Meta batida — hoje o jardim está em {nome_nivel}.",
+                fg=COR_DESTAQUE,
+            )
+        elif completos_hoje > 0:
+            falta = f" · faltam {meta - completos_hoje} p/ a meta" if meta > completos_hoje else ""
+            self.lbl_jardim_status.config(
+                text=f"🌱 {completos_hoje} planta(s) hoje — nível {nome_nivel}{falta}.",
+                fg=COR_INTERVALO,
+            )
+        else:
+            self.lbl_jardim_status.config(
+                text="🌰 Canteiro vazio. Conclua um foco para plantar sua primeira muda!",
+                fg=COR_TEXTO_FRACO,
+            )
+
+        # Dados da floresta (últimos 7 dias), calculados do mesmo histórico.
+        semana = []
+        for i in range(6, -1, -1):
+            dia = hoje - timedelta(days=i)
+            dia_iso = dia.isoformat()
+            pom = sum(
+                1 for r in historico
+                if str(r.get("data", ""))[:10] == dia_iso and not r.get("parcial")
+            )
+            semana.append((dia, pom))
+
+        # Guarda os números para o redesenho responsivo (<Configure>) poder
+        # reaproveitá-los sem reler o histórico a cada evento de tamanho.
+        self._jardim_dados = {
+            "completos": completos_hoje, "parciais": parciais_hoje,
+            "streak": streak, "meta": meta, "semana": semana,
+        }
+        self._desenhar_canteiro(completos_hoje, parciais_hoje, streak, meta)
+        self._desenhar_floresta(semana)
+
+    def _ao_redimensionar_canteiro(self, evento) -> None:
+        """Redesenha o canteiro quando a largura da aba muda (só na mudança de
+        largura — mudar a altura do canvas não dispara um novo desenho)."""
+        if getattr(self, "_larg_canteiro", None) == evento.width:
+            return
+        self._larg_canteiro = evento.width
+        dados = getattr(self, "_jardim_dados", None)
+        if dados:
+            self._desenhar_canteiro(
+                dados["completos"], dados["parciais"],
+                dados["streak"], dados["meta"],
+            )
+
+    def _ao_redimensionar_floresta(self, evento) -> None:
+        """Redesenha a floresta quando a largura da aba muda."""
+        if getattr(self, "_larg_floresta", None) == evento.width:
+            return
+        self._larg_floresta = evento.width
+        dados = getattr(self, "_jardim_dados", None)
+        if dados:
+            self._desenhar_floresta(dados["semana"])
+
+    def _desenhar_canteiro(
+        self, completos: int, parciais: int, streak: int, meta: int,
+    ) -> None:
+        """Desenha o canteiro de hoje: uma muda por pomodoro concluído, os
+        focos parciais como 🥀 e as covas ainda vazias até a meta como '·'.
+        A altura do canvas se ajusta ao número de linhas."""
+        cv = self.canvas_canteiro
+        larg = cv.winfo_width()
+        if larg <= 1:
+            return  # ainda sem layout; o <Configure> redesenha com a largura real
+        cv.delete("all")
+        nivel = self._nivel_jardim(streak)
+
+        # Lista de itens a plantar: (emoji, cor). Concluídos, depois parciais.
+        itens: list[tuple[str, str]] = [
+            (self._planta_hoje(i, nivel), COR_TEXTO) for i in range(completos)
+        ]
+        itens += [("🥀", COR_TEXTO_FRACO) for _ in range(parciais)]
+        vazios = max(0, meta - completos)  # covas restantes até a meta
+
+        # 'lado' é uma margem lateral de folga: os glifos de emoji ocupam uma
+        # caixa larga, então reservamos esse respiro para nada encostar/vazar
+        # na borda (nem no dia mais à direita).
+        cel, fileira, lado = 34, 42, 20
+        cols = max(1, int((larg - 2 * lado) // cel))
+        total = len(itens) + vazios
+
+        if total == 0:
+            cv.config(height=64)
+            cv.create_text(
+                larg / 2, 32, text="🌰  plante seu primeiro foco",
+                font=(FONTE, 11), fill=COR_TEXTO_FRACO,
+            )
+            return
+
+        linhas = math.ceil(total / cols)
+        cv.config(height=linhas * fileira + 12)
+        # Centraliza a grade (a última coluna preenchida pode não fechar a largura).
+        usados = min(cols, total)
+        margem_x = (larg - usados * cel) / 2 + cel / 2
+
+        # Um sol no canto quando a meta do dia foi batida (ancorado pela
+        # direita para o glifo largo não vazar a borda).
+        if meta > 0 and completos >= meta:
+            cv.create_text(larg - 6, 4, text="☀️", font=(FONTE, 12), anchor="ne")
+
+        for idx in range(total):
+            col, lin = idx % cols, idx // cols
+            x = margem_x + col * cel
+            y_base = 8 + lin * fileira + fileira - 14
+            # Leira de terra (óvalo marrom) onde a planta é fincada.
+            if idx < len(itens):
+                emoji, cor = itens[idx]
+                cv.create_oval(
+                    x - 11, y_base - 4, x + 11, y_base + 4,
+                    fill=COR_TERRA, width=0,
+                )
+                cv.create_text(x, y_base - 12, text=emoji, font=(FONTE, 14), fill=cor)
+            else:
+                cv.create_oval(
+                    x - 10, y_base - 3, x + 10, y_base + 3,
+                    fill=COR_TERRA_VAZIA, width=0,
+                )
+                cv.create_text(
+                    x, y_base - 11, text="·", font=(FONTE, 15), fill=COR_TEXTO_FRACO,
+                )
+
+    def _desenhar_floresta(self, semana: list[tuple[date, int]]) -> None:
+        """Desenha a floresta dos últimos 7 dias: uma planta por dia (maior
+        conforme mais pomodoros), com o dia de hoje destacado em âmbar."""
+        cv = self.canvas_floresta
+        larg = cv.winfo_width()
+        if larg <= 1:
+            return  # ainda sem layout; o <Configure> redesenha com a largura real
+        cv.delete("all")
+        alt = int(cv["height"])
+        hoje = date.today()
+
+        n = max(1, len(semana))
+        passo = larg / n
+        y_base = alt - 26
+        # Leira e planta se ajustam ao espaço de cada coluna (para caber os 7 dias).
+        raio_x = min(15, passo / 2 - 3)
+
+        for i, (dia, pom) in enumerate(semana):
+            cx = passo * (i + 0.5)
+            e_hoje = dia == hoje
+            # Contagem acima da planta.
+            if pom > 0:
+                cv.create_text(
+                    cx, y_base - 36, text=str(pom), font=(FONTE, 8),
+                    fill=COR_TEXTO if e_hoje else COR_TEXTO_FRACO,
+                )
+            # Planta do dia (ou terra nua).
+            emoji = self._planta_por_pomodoros(pom)
+            if emoji:
+                cv.create_text(cx, y_base - 18, text=emoji, font=(FONTE, 18))
+            else:
+                cv.create_text(
+                    cx, y_base - 15, text="·", font=(FONTE, 16), fill=COR_TEXTO_FRACO,
+                )
+            # Leira de terra (âmbar no dia de hoje).
+            cv.create_oval(
+                cx - raio_x, y_base - 5, cx + raio_x, y_base + 5,
+                fill=COR_DESTAQUE if e_hoje else COR_TERRA, width=0,
+            )
+            # Rótulo: dia da semana + número do dia.
+            rotulo = f"{self.DIAS_SEMANA[dia.weekday()]} {dia.day:02d}"
+            cv.create_text(
+                cx, alt - 10, text=rotulo, font=(FONTE, 8),
+                fill=COR_TEXTO if e_hoje else COR_TEXTO_FRACO,
+            )
+
     # ------------------------ Aba Configurações ------------------------- #
     def _montar_aba_config(self) -> None:
         wrap = self._frame_rolavel(self.aba_config)
@@ -655,6 +1164,12 @@ class FocoPomodoro:
         self.var_prorrogacao_min = tk.IntVar(value=self.config["prorrogacao_min"])
         self.var_som_ambiente = tk.StringVar(value=self.config["som_ambiente"])
         self.var_meta = tk.IntVar(value=self.config["meta_pomodoros_dia"])
+        # Dispositivo de saída fixo: guardamos o VALOR bruto ("" = padrão do
+        # Windows; caso contrário, o nome do dispositivo). O combobox mostra
+        # rótulos e mapeia de volta para estes valores em self._disp_valores.
+        self._disp_valor = self.config.get("dispositivo_audio", "")
+        self._disp_valores: list[str] = [""]
+        self._disp_nomes_cache: list[str] = []
 
         # ---- Tempos ----
         self._titulo_secao(wrap, "⏱  Tempos")
@@ -745,6 +1260,45 @@ class FocoPomodoro:
             font=(FONTE, 9), fg=COR_TEXTO_FRACO, bg=COR_FUNDO,
             justify="left", wraplength=360,
         ).pack(anchor="w", pady=(0, 4))
+
+        # ---- Dispositivo de saída ----
+        self._titulo_secao(wrap, "🎧  Dispositivo de saída")
+        tk.Label(
+            wrap,
+            text=("Escolha por qual dispositivo o app toca TODOS os sons. "
+                  "Assim o áudio fica fixo nele mesmo que você troque o "
+                  "dispositivo padrão do Windows (ex.: ao pôr o fone para "
+                  "falar com alguém)."),
+            font=(FONTE, 9), fg=COR_TEXTO_FRACO, bg=COR_FUNDO,
+            justify="left", wraplength=360,
+        ).pack(anchor="w", pady=(0, 6))
+
+        linha_disp = tk.Frame(wrap, bg=COR_FUNDO)
+        linha_disp.pack(fill="x", pady=5)
+        tk.Label(
+            linha_disp, text="Sair o som por", font=(FONTE, 10),
+            fg=COR_TEXTO, bg=COR_FUNDO,
+        ).pack(side="left")
+        self._criar_botao(
+            linha_disp, "▶", self._testar_dispositivo, padx=10, pady=3,
+        ).pack(side="right", padx=(6, 0))
+        self._criar_botao(
+            linha_disp, "🔄", self._recarregar_dispositivos, padx=10, pady=3,
+        ).pack(side="right", padx=(6, 0))
+        self.combo_dispositivo = ttk.Combobox(
+            linha_disp, state="readonly", width=24, font=(FONTE, 10),
+        )
+        self.combo_dispositivo.pack(side="right")
+        self.combo_dispositivo.bind(
+            "<<ComboboxSelected>>", lambda e: self._ao_escolher_dispositivo(),
+        )
+        self.lbl_disp_aviso = tk.Label(
+            wrap, text="", font=(FONTE, 9), fg=COR_TEXTO_FRACO, bg=COR_FUNDO,
+            justify="left", wraplength=360,
+        )
+        self.lbl_disp_aviso.pack(anchor="w", pady=(0, 2))
+        # Carrega a lista de dispositivos em segundo plano (pode instalar/consultar).
+        self._popular_dispositivos()
 
         # ---- Notificações ----
         self._titulo_secao(wrap, "🔔  Notificações")
@@ -966,6 +1520,7 @@ class FocoPomodoro:
 
         self.rodando = True
         self.btn_iniciar.config(text="⏸  Pausar")
+        self._atualizar_icone_bandeja()
         self._bloquear_tarefa(True)
         # O ambiente entra com um pequeno atraso para não engolir o alerta
         # de fim de ciclo (o winsound só toca um som por vez).
@@ -975,6 +1530,7 @@ class FocoPomodoro:
     def _pausar(self) -> None:
         self.rodando = False
         self.btn_iniciar.config(text="▶  Iniciar")
+        self._atualizar_icone_bandeja()
         self._bloquear_tarefa(False)
         sons.parar_ambiente()
         if self._job is not None:
@@ -998,6 +1554,48 @@ class FocoPomodoro:
     def _bloquear_tarefa(self, bloquear: bool) -> None:
         """Trava o combobox durante a contagem (valor fixo)."""
         self.combo_tarefa.config(state="disabled" if bloquear else "readonly")
+
+    def _estilizar_dropdown_tarefa(self) -> None:
+        """Enfeita o popdown do combobox de foco: fonte maior, tema escuro,
+        itens centralizados e dois tons alternados (zebra) entre as linhas. Roda
+        via ``postcommand``, ou seja, é reaplicado toda vez que a lista abre
+        (inclusive após editar as tarefas). O listbox interno é acessado pela
+        proc padrão do ttk; se a versão do Tk mudar isso, o try/except deixa o
+        combobox seguir normal, só sem os enfeites."""
+        combo = self.combo_tarefa
+        try:
+            popdown = combo.tk.call("ttk::combobox::PopdownWindow", combo)
+        except tk.TclError:
+            return
+        lista = f"{popdown}.f.l"
+
+        def pintar() -> None:
+            # after_idle: roda depois de o Tk repovoar o listbox com os valores
+            # atuais, garantindo que os índices coloridos batam com os itens.
+            try:
+                combo.tk.call(
+                    lista, "configure",
+                    "-font", (FONTE, 12),
+                    "-justify", "center",
+                    "-background", COR_PAINEL,
+                    "-foreground", COR_TEXTO,
+                    "-selectbackground", COR_FOCO,
+                    "-selectforeground", "#ffffff",
+                    "-activestyle", "none",
+                    "-borderwidth", 0,
+                    "-highlightthickness", 0,
+                )
+                for i in range(len(combo.cget("values"))):
+                    cor = COR_ITEM_ESCURO if i % 2 == 0 else COR_ITEM_CLARO
+                    combo.tk.call(
+                        lista, "itemconfigure", i,
+                        "-background", cor,
+                        "-foreground", COR_ITEM_TEXTO,
+                    )
+            except tk.TclError:
+                pass
+
+        self.root.after_idle(pintar)
 
     def _tique(self) -> None:
         if not self.rodando:
@@ -1039,13 +1637,10 @@ class FocoPomodoro:
 
         if terminou_foco:
             if prorrogacao:
-                # Fim de um "+5 min": grava só os minutos extras, sem contar
-                # como um novo pomodoro (o original já foi contabilizado).
-                db.registrar_pomodoro(
-                    tarefa, self.segundos_totais // 60,
-                    dias_manter=self.config.get("dias_historico", 30),
-                    parcial=True,
-                )
+                # Fim de um "+X min": soma os minutos extras à duração do
+                # pomodoro que foi prorrogado (faz parte dele), sem criar um
+                # registro parcial isolado nem contar como novo pomodoro.
+                db.estender_ultimo_pomodoro(self.segundos_totais // 60, tarefa)
             else:
                 # Registra o pomodoro concluído.
                 db.registrar_pomodoro(
@@ -1058,6 +1653,7 @@ class FocoPomodoro:
                 )
             self._atualizar_aba_historico()
             self._verificar_meta_diaria()
+            self._atualizar_aba_jardim()
 
         proximo = self._proximo_estado()
 
@@ -1138,6 +1734,7 @@ class FocoPomodoro:
 
         self.lbl_estado.config(text=rotulo, fg=cor)
         self._definir_cor_anel(cor)
+        self._atualizar_icone_bandeja()
         self._atualizar_visor()
 
     def _definir_cor_anel(self, cor: str) -> None:
@@ -1146,23 +1743,31 @@ class FocoPomodoro:
         self.canvas.itemconfig(self.cap_fim, fill=cor)
 
     def _registrar_foco_parcial(self) -> None:
-        """Aproveita o tempo já focado quando um foco é abandonado no meio.
+        """Aproveita o tempo já focado quando um foco é interrompido no meio.
 
-        Grava um registro marcado como parcial se houver ao menos 1 minuto
-        decorrido — assim os minutos não se perdem, mas o registro não conta
-        como pomodoro completo (meta, streak e contagens ignoram parciais)."""
+        Só age se houver ao menos 1 minuto decorrido — assim os minutos não se
+        perdem. O destino depende do tipo de foco:
+
+          * prorrogação (+X min) interrompida: o tempo faz parte do pomodoro
+            que estava sendo estendido, então é SOMADO à duração dele;
+          * foco normal abandonado: vira um registro parcial ◐, que soma
+            minutos mas não conta como pomodoro completo (meta/streak ignoram)."""
         if self.estado != FOCO:
             return
         decorrido = self.segundos_totais - self.segundos_restantes
         if decorrido < 60:
             return
         tarefa = self.var_tarefa.get().strip() or "(sem descrição)"
-        db.registrar_pomodoro(
-            tarefa, decorrido // 60,
-            dias_manter=self.config.get("dias_historico", 30),
-            parcial=True,
-        )
+        if self._prorrogacao:
+            db.estender_ultimo_pomodoro(decorrido // 60, tarefa)
+        else:
+            db.registrar_pomodoro(
+                tarefa, decorrido // 60,
+                dias_manter=self.config.get("dias_historico", 30),
+                parcial=True,
+            )
         self._atualizar_aba_historico()
+        self._atualizar_aba_jardim()
 
     def reiniciar_ciclo(self) -> None:
         """Volta o ciclo atual ao tempo cheio, sem perder o estado."""
@@ -1269,11 +1874,11 @@ class FocoPomodoro:
         total_min = sum(int(r.get("duracao_min", 0)) for r in registros)
         horas, minutos = divmod(total_min, 60)
         texto_tempo = f"{horas}h {minutos}min" if horas else f"{minutos} min"
-        self.cartao_total_foco.lbl_valor.config(text=texto_tempo)
-        # Parciais (prorrogações e focos interrompidos) somam minutos,
-        # mas não contam como pomodoro concluído.
+        self._definir_valor_cartao(self.cartao_total_foco, texto_tempo)
+        # Parciais (focos interrompidos) somam minutos, mas não contam como
+        # pomodoro concluído.
         completos = sum(1 for r in registros if not r.get("parcial"))
-        self.cartao_qtd.lbl_valor.config(text=str(completos))
+        self._definir_valor_cartao(self.cartao_qtd, str(completos))
 
         # Recarrega a tabela (mais recentes no topo), guardando qual registro
         # corresponde a cada linha para as ações de editar/remover.
@@ -1298,6 +1903,7 @@ class FocoPomodoro:
         tabela/cartões do Histórico, aba Estatísticas e meta da aba Timer."""
         self._atualizar_aba_historico()
         self._atualizar_estatisticas()
+        self._atualizar_aba_jardim()
         self._atualizar_rotulo_meta()
 
     def _registro_selecionado(self) -> dict | None:
@@ -1586,6 +2192,65 @@ class FocoPomodoro:
     # ===================================================================== #
     # Ações de configuração e dados
     # ===================================================================== #
+    # -------------------- Dispositivo de saída de áudio ------------------ #
+    def _popular_dispositivos(self) -> None:
+        """Busca os dispositivos de saída em segundo plano (a consulta pode
+        instalar o suporte e/ou demorar) e preenche o combobox ao terminar."""
+        self.combo_dispositivo.config(values=["Carregando…"])
+        self.combo_dispositivo.set("Carregando…")
+        self.lbl_disp_aviso.config(text="")
+
+        def carregar():
+            nomes = sons.listar_dispositivos()
+            self.root.after(0, lambda: self._montar_lista_dispositivos(nomes))
+
+        threading.Thread(target=carregar, daemon=True).start()
+
+    def _recarregar_dispositivos(self) -> None:
+        """Botão 🔄: re-enumera os dispositivos (após conectar/desconectar um)."""
+        self._popular_dispositivos()
+
+    def _montar_lista_dispositivos(self, nomes: list[str]) -> None:
+        """Monta o combobox a partir dos nomes encontrados, mantendo a escolha
+        atual selecionada (mesmo que o dispositivo esteja desconectado)."""
+        self._disp_nomes_cache = list(nomes)
+        rotulos = [self.ROTULO_DISP_PADRAO] + list(nomes)
+        valores = [""] + list(nomes)
+        # O dispositivo salvo pode não estar presente agora (desconectado):
+        # mantém-no na lista para não parecer que a escolha se perdeu.
+        if self._disp_valor and self._disp_valor not in valores:
+            rotulos.append(f"{self._disp_valor}  (desconectado)")
+            valores.append(self._disp_valor)
+        self._disp_valores = valores
+        self.combo_dispositivo.config(values=rotulos)
+        try:
+            self.combo_dispositivo.current(valores.index(self._disp_valor))
+        except ValueError:
+            self.combo_dispositivo.current(0)
+
+        if not nomes:
+            self.lbl_disp_aviso.config(
+                text=("Nenhum dispositivo listado. O suporte para escolher a "
+                      "saída pode não estar disponível — o som segue no padrão "
+                      "do Windows. Tente 🔄 para atualizar."),
+            )
+        else:
+            self.lbl_disp_aviso.config(
+                text="Não vê seu dispositivo? Conecte-o e clique 🔄 para atualizar.",
+            )
+
+    def _ao_escolher_dispositivo(self) -> None:
+        """Guarda o valor bruto do item escolhido no combobox."""
+        idx = self.combo_dispositivo.current()
+        if 0 <= idx < len(self._disp_valores):
+            self._disp_valor = self._disp_valores[idx]
+
+    def _testar_dispositivo(self) -> None:
+        """Aplica o dispositivo escolhido e toca um som de amostra por ele, para
+        o usuário conferir a saída antes de salvar."""
+        sons.definir_dispositivo(self._disp_valor or None)
+        sons.tocar(self.var_som_pomodoro.get(), self.var_volume.get())
+
     def _valores_config_atuais(self) -> dict:
         """Lê as variáveis da aba Configurações e devolve o dicionário
         correspondente. Pode lançar tk.TclError se algum campo estiver vazio."""
@@ -1607,6 +2272,7 @@ class FocoPomodoro:
             "prorrogacao_min": int(self.var_prorrogacao_min.get()),
             "som_ambiente": self.var_som_ambiente.get(),
             "meta_pomodoros_dia": int(self.var_meta.get()),
+            "dispositivo_audio": self._disp_valor,
         }
 
     def _config_tem_alteracoes(self) -> bool:
@@ -1622,9 +2288,16 @@ class FocoPomodoro:
         self.config.update(self._valores_config_atuais())
         db.salvar_config(self.config)
 
+        # Aplica de imediato a saída de áudio escolhida.
+        dispositivo = self.config.get("dispositivo_audio", "")
+        sons.definir_dispositivo(dispositivo or None)
+        if dispositivo:
+            sons.garantir_async()
+
         # Aplica imediatamente o novo limite de retenção do histórico.
         db.podar_historico(self.config["dias_historico"])
         self._atualizar_aba_historico()
+        self._atualizar_aba_jardim()
         self._atualizar_rotulo_meta()
 
         # Se o timer estiver parado, aplica o novo tempo ao ciclo atual.
@@ -1655,6 +2328,10 @@ class FocoPomodoro:
         self.var_prorrogacao_min.set(self.config["prorrogacao_min"])
         self.var_som_ambiente.set(self.config["som_ambiente"])
         self.var_meta.set(self.config["meta_pomodoros_dia"])
+        # Dispositivo de saída: volta ao valor salvo e reaplica na reprodução.
+        self._disp_valor = self.config.get("dispositivo_audio", "")
+        sons.definir_dispositivo(self._disp_valor or None)
+        self._montar_lista_dispositivos(self._disp_nomes_cache)
 
     def _tratar_config_pendente(self) -> bool:
         """Se houver alterações não salvas na aba Configurações, pergunta o
@@ -1686,9 +2363,11 @@ class FocoPomodoro:
                 self._aba_atual = self._idx_config
                 self.abas.select(self._idx_config)
                 return
-        # Estatísticas sempre recalculadas ao entrar na aba.
+        # Estatísticas e Jardim sempre recalculados ao entrar na aba.
         if atual == self._idx_stats:
             self._atualizar_estatisticas()
+        elif atual == self._idx_jardim:
+            self._atualizar_aba_jardim()
 
     # --------------------- Lista de tarefas (combobox) ------------------- #
     def _recarregar_lista_tarefas(self) -> None:
@@ -1832,6 +2511,8 @@ class FocoPomodoro:
             self.pomodoros_concluidos_sessao = 0
             self.lbl_sessao.config(text="Pomodoros nesta sessão: 0")
             self._atualizar_aba_historico()
+            self._atualizar_estatisticas()
+            self._atualizar_aba_jardim()
 
     # ===================================================================== #
     def _notificar(self, titulo: str, mensagem: str) -> None:
@@ -1859,7 +2540,7 @@ class FocoPomodoro:
         win.configure(bg=COR_FUNDO)
         win.resizable(False, False)
         try:
-            win.iconbitmap(default="foco.ico")
+            win.iconbitmap(default=ICONE_FOCO)
         except tk.TclError:
             pass
 
@@ -1908,24 +2589,34 @@ class FocoPomodoro:
         win.after(50, lambda: (win.lift(), win.attributes("-topmost", True)))
 
 
+def _definir_identidade_windows() -> None:
+    """Dá ao processo uma identidade própria na barra de tarefas do Windows.
+
+    Sem isso, um app aberto via pythonw.exe herda a identidade (e o ícone) do
+    atalho/pythonw, e as trocas de ícone feitas na janela não aparecem no botão
+    da barra de tarefas. Com um AppUserModelID próprio, o ícone da janela — e as
+    trocas conforme o estado — passam a valer no botão da barra."""
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "JuanCleber.FocoPomodoro.Timer"
+        )
+    except Exception:
+        pass
+
+
 def main() -> None:
+    # Precisa vir antes de qualquer janela para valer na barra de tarefas.
+    _definir_identidade_windows()
+
     root = tk.Tk()
     app = FocoPomodoro(root)
 
-    # Evita fechar a janela no meio de um pomodoro sem avisar.
-    def ao_fechar():
-        # Avisa se há configurações alteradas e ainda não salvas.
-        if not app._tratar_config_pendente():
-            return
-        if app.rodando and not messagebox.askyesno(
-            "Sair", "O timer está rodando. Deseja realmente sair?"
-        ):
-            return
-        # Aproveita o tempo de um foco interrompido pelo fechamento.
-        app._registrar_foco_parcial()
-        root.destroy()
-
-    root.protocol("WM_DELETE_WINDOW", ao_fechar)
+    # Evita fechar a janela no meio de um pomodoro sem avisar (mesma lógica
+    # usada pelo item "Sair" do menu da bandeja).
+    root.protocol("WM_DELETE_WINDOW", app.encerrar)
     root.mainloop()
 
 
